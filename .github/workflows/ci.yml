@@ -4,30 +4,69 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test-linux:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.12", "3.13", "3.14"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
         with:
           python-version: ${{ matrix.python-version }}
+          version: "0.12.3"
       - run: uv sync --extra dev --locked
       - run: uv run pytest
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run mypy
 
+  package-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          python-version: "3.12"
+          version: "0.12.3"
+      - name: Check lockfile
+        run: uv lock --check
+      - name: Install release tools
+        run: uv sync --extra dev --locked
+      - name: Build distributions from source archive
+        run: |
+          uv build --sdist --clear
+          uv build --wheel dist/*.tar.gz
+      - name: Check distribution metadata and contents
+        run: |
+          uv run twine check --strict dist/*
+          uv run python scripts/verify_dist.py dist
+      - name: Smoke test installed wheel
+        run: |
+          SMOKE_VENV="$RUNNER_TEMP/agentchaos-smoke"
+          EXPECTED_VERSION=$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+          uv venv --python 3.12 "$SMOKE_VENV"
+          uv pip install --python "$SMOKE_VENV/bin/python" --strict dist/*.whl
+          test "$("$SMOKE_VENV/bin/agentchaos" --version)" = "agentchaos $EXPECTED_VERSION"
+          "$SMOKE_VENV/bin/agentchaos" --help >/dev/null
+          "$SMOKE_VENV/bin/agentchaos" validate examples/scenarios/api_503_recovery.yaml
+          PATH="$SMOKE_VENV/bin:$PATH" "$SMOKE_VENV/bin/agentchaos" run \
+            examples/scenarios/api_503_recovery.yaml \
+            --output-dir "$RUNNER_TEMP/agentchaos-runs"
+
   smoke-macos:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
         with:
           python-version: "3.12"
+          version: "0.12.3"
       - run: uv sync --extra dev --locked
       - run: uv run pytest tests/test_integration.py
 

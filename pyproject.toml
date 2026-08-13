@@ -3,13 +3,14 @@ requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
-name = "agent-chaos"
+name = "agent-chaos-runner"
 version = "0.1.0"
 description = "Chaos engineering for autonomous AI agents"
 readme = "README.md"
 requires-python = ">=3.12"
 license = "Apache-2.0"
-authors = [{ name = "Agent Chaos contributors" }]
+authors = [{ name = "Carlos Orozco" }]
+keywords = ["ai-agents", "chaos-engineering", "resilience", "testing"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Environment :: Console",
@@ -18,6 +19,8 @@ classifiers = [
   "Operating System :: POSIX :: Linux",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
   "Topic :: Software Development :: Testing",
 ]
 dependencies = [
@@ -35,8 +38,16 @@ dev = [
   "pytest>=8.3,<9",
   "pytest-asyncio>=0.24,<1",
   "ruff>=0.6,<1",
+  "twine>=7,<8",
   "types-PyYAML>=6.0,<7",
 ]
+
+[project.urls]
+Homepage = "https://github.com/Coroz2/agent-chaos"
+Documentation = "https://github.com/Coroz2/agent-chaos#readme"
+Repository = "https://github.com/Coroz2/agent-chaos"
+Issues = "https://github.com/Coroz2/agent-chaos/issues"
+Changelog = "https://github.com/Coroz2/agent-chaos/blob/main/CHANGELOG.md"
 
 [project.scripts]
 agentchaos = "agentchaos.cli:app"

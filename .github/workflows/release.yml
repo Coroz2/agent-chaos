@@ -1,0 +1,131 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          python-version: "3.12"
+          version: "0.12.3"
+      - name: Validate release tag and changelog
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python - <<'PY'
+          import os
+          import tomllib
+          from pathlib import Path
+
+          project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]
+          version = project["version"]
+          expected_tag = f"v{version}"
+          actual_tag = os.environ["RELEASE_TAG"]
+          if actual_tag != expected_tag:
+              raise SystemExit(f"tag {actual_tag!r} does not match {expected_tag!r}")
+          if project["name"] != "agent-chaos-runner":
+              raise SystemExit("unexpected PyPI distribution name")
+
+          changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
+          if f"## [{version}] - YYYY-MM-DD" in changelog:
+              raise SystemExit("replace the changelog date placeholder before releasing")
+          if f"## [{version}] - " not in changelog:
+              raise SystemExit(f"CHANGELOG.md has no release heading for {version}")
+          PY
+          test "$(git cat-file -t "refs/tags/$RELEASE_TAG")" = "tag"
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+      - name: Check lockfile
+        run: uv lock --check
+      - name: Install release tools
+        run: uv sync --extra dev --locked
+      - name: Run quality gates
+        run: |
+          uv run pytest
+          uv run ruff check .
+          uv run ruff format --check .
+          uv run mypy
+      - name: Build distributions from source archive
+        run: |
+          uv build --sdist --clear
+          uv build --wheel dist/*.tar.gz
+      - name: Check distribution metadata and contents
+        run: |
+          uv run twine check --strict dist/*
+          uv run python scripts/verify_dist.py dist
+      - name: Smoke test installed wheel
+        run: |
+          SMOKE_VENV="$RUNNER_TEMP/agentchaos-release-smoke"
+          EXPECTED_VERSION=$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+          uv venv --python 3.12 "$SMOKE_VENV"
+          uv pip install --python "$SMOKE_VENV/bin/python" --strict dist/*.whl
+          test "$("$SMOKE_VENV/bin/agentchaos" --version)" = "agentchaos $EXPECTED_VERSION"
+          "$SMOKE_VENV/bin/agentchaos" --help >/dev/null
+          "$SMOKE_VENV/bin/agentchaos" validate examples/scenarios/api_503_recovery.yaml
+          PATH="$SMOKE_VENV/bin:$PATH" "$SMOKE_VENV/bin/agentchaos" run \
+            examples/scenarios/api_503_recovery.yaml \
+            --output-dir "$RUNNER_TEMP/agentchaos-release-runs"
+      - name: Prepare release artifacts
+        run: |
+          mkdir -p release/packages
+          cp dist/*.whl dist/*.tar.gz release/packages/
+          sha256sum release/packages/* > release/SHA256SUMS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-dists
+          path: release/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish-pypi:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/agent-chaos-runner
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-dists
+          path: release
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          packages-dir: release/packages
+          skip-existing: true
+
+  publish-github:
+    needs: publish-pypi
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-dists
+          path: release
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$RELEASE_TAG" \
+            release/packages/* \
+            release/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "Agent Chaos $RELEASE_TAG" \
+            --generate-notes
+

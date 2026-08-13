@@ -16,11 +16,25 @@ flowchart LR
     C -. "inject fault" .-> C
 ```
 
-## Quick start
+## Install
 
-Prerequisites: Python 3.12+, `uv`, macOS or Linux.
+The published Python distribution is named `agent-chaos-runner`; the product and installed
+command remain Agent Chaos and `agentchaos`.
 
 ```bash
+uv tool install agent-chaos-runner
+agentchaos --version
+```
+
+Agent Chaos supports Python 3.12+ on macOS and Linux.
+
+## Quick start
+
+Clone the repository to run the deterministic local demo without API keys:
+
+```bash
+git clone https://github.com/Coroz2/agent-chaos.git
+cd agent-chaos
 uv sync --extra dev
 uv run agentchaos run examples/scenarios/api_503_recovery.yaml
 ```
@@ -140,6 +154,3 @@ The next logical steps are richer HTTP failures such as 429s and connection rese
 policies and multi-fault campaigns, then another dependency adapter such as MCP.
 
 Licensed under Apache-2.0.
-
-# agent-chaos
-# agent-chaos
