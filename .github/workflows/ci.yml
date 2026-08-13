@@ -4,6 +4,10 @@ on:
   push:
   pull_request:
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -70,3 +74,18 @@ jobs:
       - run: uv sync --extra dev --locked
       - run: uv run pytest tests/test_integration.py
 
+  ci-gate:
+    name: CI Gate
+    if: ${{ always() }}
+    needs: [test-linux, package-linux, smoke-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all CI jobs to pass
+        env:
+          TEST_LINUX_RESULT: ${{ needs.test-linux.result }}
+          PACKAGE_LINUX_RESULT: ${{ needs.package-linux.result }}
+          SMOKE_MACOS_RESULT: ${{ needs.smoke-macos.result }}
+        run: |
+          test "$TEST_LINUX_RESULT" = "success"
+          test "$PACKAGE_LINUX_RESULT" = "success"
+          test "$SMOKE_MACOS_RESULT" = "success"

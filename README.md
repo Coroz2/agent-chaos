@@ -35,7 +35,7 @@ Clone the repository to run the deterministic local demo without API keys:
 ```bash
 git clone https://github.com/Coroz2/agent-chaos.git
 cd agent-chaos
-uv sync --extra dev
+uv sync --extra dev --locked
 uv run agentchaos run examples/scenarios/api_503_recovery.yaml
 ```
 
@@ -136,6 +136,9 @@ uv run ruff check .
 uv run ruff format --check .
 uv run mypy
 ```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the branch, pull request, verification, and release
+workflow.
 
 ## Limitations
 
