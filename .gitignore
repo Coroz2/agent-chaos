@@ -1,0 +1,10 @@
+.agentchaos/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.venv/
+.uv-bootstrap/
+.uv-cache/
+__pycache__/
+*.py[cod]
+dist/

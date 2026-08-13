@@ -1,0 +1,23 @@
+schema_version: 1
+name: no-fault-baseline
+
+dependency:
+  type: http
+  base_url: http://127.0.0.1:19101
+  start:
+    command: [python, fake_api.py, --port, "19101"]
+    cwd: ..
+    readiness:
+      path: /health
+
+workload:
+  name: demo-agent
+  command: [python, demo_agent.py]
+  cwd: ..
+  proxy_url_env: CUSTOMER_API_URL
+
+success:
+  exit_code: 0
+
+timeout_seconds: 10
+

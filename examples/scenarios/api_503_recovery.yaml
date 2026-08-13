@@ -1,0 +1,32 @@
+schema_version: 1
+name: api-503-recovery
+
+dependency:
+  type: http
+  base_url: http://127.0.0.1:19103
+  start:
+    command: [python, fake_api.py, --port, "19103"]
+    cwd: ..
+    readiness:
+      path: /health
+
+workload:
+  name: demo-agent
+  command: [python, demo_agent.py]
+  cwd: ..
+  proxy_url_env: CUSTOMER_API_URL
+
+fault:
+  type: http_error
+  target:
+    method: GET
+    path: /customer/*
+  trigger:
+    occurrence: 2
+  status_code: 503
+
+success:
+  exit_code: 0
+
+timeout_seconds: 10
+
