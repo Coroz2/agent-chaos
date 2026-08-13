@@ -44,7 +44,7 @@ jobs:
               raise SystemExit(f"CHANGELOG.md has no release heading for {version}")
           PY
           test "$(git cat-file -t "refs/tags/$RELEASE_TAG")" = "tag"
-          git fetch --no-tags origin main
+          git fetch --no-tags origin main:refs/remotes/origin/main
           git merge-base --is-ancestor "$GITHUB_SHA" origin/main
       - name: Check lockfile
         run: uv lock --check
@@ -128,4 +128,3 @@ jobs:
             --verify-tag \
             --title "Agent Chaos $RELEASE_TAG" \
             --generate-notes
-
