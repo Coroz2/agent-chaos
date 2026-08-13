@@ -255,20 +255,15 @@ class ChaosProxy:
         state: FaultOperationState,
     ) -> bool:
         delay_task = asyncio.create_task(asyncio.sleep(fault.latency_ms / 1000))
-        disconnect_task = asyncio.create_task(self._wait_for_disconnect(request))
         retry_task = asyncio.create_task(state.retry_seen.wait())
         done, pending = await asyncio.wait(
-            {delay_task, disconnect_task, retry_task},
+            {delay_task, retry_task},
             return_when=asyncio.FIRST_COMPLETED,
         )
         for task in pending:
             task.cancel()
         await asyncio.gather(*pending, return_exceptions=True)
-        return disconnect_task in done or retry_task in done
-
-    async def _wait_for_disconnect(self, request: Request) -> None:
-        while not await request.is_disconnected():
-            await asyncio.sleep(0.01)
+        return retry_task in done or await request.is_disconnected()
 
     async def _should_inject(self, method: str, path: str) -> bool:
         if self.fault is None or self.trigger is None:
