@@ -127,6 +127,14 @@ uv run agentchaos run examples/scenarios/api_503_recovery.yaml
 
 Use `--output-dir PATH` to place run directories somewhere other than `.agentchaos/runs`.
 
+## Documentation
+
+- [Project vision](docs/PROJECT-VISION.md): stable mission, principles, capability map, and
+  boundaries.
+- [Documentation index](docs/README.md): authority map for specifications, release guidance, and
+  archived planning.
+- [v0.1 specification](docs/specs/v0.1.md): complete contract for the released v0.1 behavior.
+
 ## Development
 
 ```bash
@@ -154,6 +162,7 @@ It is useful black-box evidence, not proof of the workload's internal intent.
 ## Roadmap
 
 The next logical steps are richer HTTP failures such as 429s and connection resets, richer trigger
-policies and multi-fault campaigns, then another dependency adapter such as MCP.
+policies and multi-fault campaigns, then another dependency adapter such as MCP. These are broad,
+nonbinding directions; detailed release scope begins only in an approved version specification.
 
 Licensed under Apache-2.0.

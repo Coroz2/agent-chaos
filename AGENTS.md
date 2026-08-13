@@ -8,8 +8,10 @@ CI-friendly, and safe for captured workload data.
 
 ## Required context
 
+- Before planning product direction or release scope, read `docs/README.md` and
+  `docs/PROJECT-VISION.md`.
 - Before changing runtime behavior, scenario schemas, CLI contracts, events, reports, or public
-  result semantics, read `docs/PROJECT-SPEC.md`.
+  result semantics, read the applicable versioned specification under `docs/specs/`.
 - Before creating a branch, preparing commits, or opening a pull request, read `CONTRIBUTING.md`.
 - Before changing versions, package metadata, build artifacts, tags, or publishing automation,
   read `docs/RELEASING.md`.
@@ -23,8 +25,10 @@ CI-friendly, and safe for captured workload data.
   public contracts. Make compatibility changes deliberately and test them.
 - Never persist request headers, request bodies, raw query values, credentials, or other secrets in
   events, reports, or logs.
-- Keep source, tests, examples, README guidance, the project specification, and changelog aligned
-  with behavior. Add an `Unreleased` changelog entry for user-visible changes.
+- Keep source, tests, examples, README guidance, the applicable versioned specification, and
+  changelog aligned with behavior. Add an `Unreleased` changelog entry for user-visible changes.
+- Do not add future behavior to a released specification. New release scope starts in a draft
+  specification and changes to the project vision require explicit product-level approval.
 - Do not add production dependencies or broaden platform support without calling out the impact.
 
 ## Branches and pull requests
