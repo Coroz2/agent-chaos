@@ -43,6 +43,8 @@ jobs:
           if f"## [{version}] - " not in changelog:
               raise SystemExit(f"CHANGELOG.md has no release heading for {version}")
           PY
+          git fetch --force --no-tags origin \
+            "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
           if ! git cat-file -e "refs/tags/$RELEASE_TAG^{tag}"; then
             echo "::error::Release tags must be annotated tags"
             exit 1
