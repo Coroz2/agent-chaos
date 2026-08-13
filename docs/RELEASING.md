@@ -19,10 +19,11 @@ release and verify that the spelling matches the workflow exactly.
 
 ## Prepare a release
 
-1. Confirm `main` is clean, synchronized with `origin/main`, and green in GitHub Actions.
-2. Confirm `pyproject.toml` contains the intended version.
-3. Replace `YYYY-MM-DD` in the matching `CHANGELOG.md` heading with the release date.
-4. Build and inspect the release archives:
+1. Confirm `main` is synchronized with `origin/main` and green in GitHub Actions.
+2. Create `release/vX.Y.Z` from `main`, using the intended release version in the branch name.
+3. Confirm `pyproject.toml` contains that version.
+4. Replace `YYYY-MM-DD` in the matching `CHANGELOG.md` heading with the release date.
+5. Build and inspect the release archives:
 
    ```bash
    uv lock --check
@@ -32,12 +33,16 @@ release and verify that the spelling matches the workflow exactly.
    uv run python scripts/verify_dist.py dist
    ```
 
-5. Run the complete local verification commands documented in the README.
-6. Commit and push the release preparation changes, then wait for CI to pass.
+6. Run the complete local verification commands documented in the README.
+7. Open a pull request with a `release: prepare vX.Y.Z` title, wait for `CI Gate` to pass, and
+   squash merge it into `main`.
+8. Update local `main` with `git pull --ff-only origin main` and confirm the merged release commit is
+   checked out before tagging.
 
 ## Publish
 
-Create and push an annotated tag only after the one-time setup is complete:
+Create and push an annotated tag from the release commit on `main` only after the one-time setup is
+complete:
 
 ```bash
 git tag -a v0.1.0 -m "Agent Chaos v0.1.0"
