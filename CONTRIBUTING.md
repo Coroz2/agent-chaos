@@ -43,7 +43,13 @@ reports that they are out of date.
 
 ## Make changes
 
-- Read `docs/PROJECT-SPEC.md` before changing runtime behavior or public contracts.
+- Read `docs/README.md` to identify the authoritative document for the proposed change.
+- Read `docs/PROJECT-VISION.md` before changing product direction, core concepts, delivery model,
+  or project boundaries. Vision changes require a focused product proposal and explicit maintainer
+  approval; do not bundle them into an ordinary feature pull request.
+- Read the applicable versioned specification under `docs/specs/` before changing runtime behavior
+  or public contracts. State the compatibility impact in the pull request and create or update a
+  draft specification for behavior intended for a future release.
 - Add or update tests for behavioral changes and regressions.
 - Update examples and documentation when commands, configuration, or observable behavior changes.
 - Add a concise entry under `Unreleased` in `CHANGELOG.md` for user-visible changes. Pure test,
@@ -76,6 +82,9 @@ For packaging, version, or release automation changes, also follow the build and
 - Resolve open review conversations and wait for the required `CI Gate` check to pass.
 - Squash merge the pull request. The pull request title becomes the commit on `main`.
 - Delete the source branch after merging.
+
+Released specifications are historical contracts. Do not add future behavior to them; corrections
+must be factual, narrowly scoped, and clearly identified as errata.
 
 Individual commits on a working branch may be incremental; the pull request title and final squash
 commit carry the durable Conventional Commit message.
