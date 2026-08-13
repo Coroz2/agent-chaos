@@ -43,9 +43,16 @@ jobs:
           if f"## [{version}] - " not in changelog:
               raise SystemExit(f"CHANGELOG.md has no release heading for {version}")
           PY
-          test "$(git cat-file -t "refs/tags/$RELEASE_TAG")" = "tag"
-          git fetch --no-tags origin main:refs/remotes/origin/main
-          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+          if ! git cat-file -e "refs/tags/$RELEASE_TAG^{tag}"; then
+            echo "::error::Release tags must be annotated tags"
+            exit 1
+          fi
+          git fetch --force --no-tags origin main:refs/remotes/origin/main
+          TAG_COMMIT=$(git rev-list -n 1 "$RELEASE_TAG")
+          if ! git merge-base --is-ancestor "$TAG_COMMIT" origin/main; then
+            echo "::error::Release tag commit must be on main"
+            exit 1
+          fi
       - name: Check lockfile
         run: uv lock --check
       - name: Install release tools
