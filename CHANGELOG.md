@@ -13,6 +13,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   result summary as live runs.
 - Deterministic HTTP 429 rate-limit injection with integer `Retry-After` values, structured
   recovery evidence, and managed offline recovery and no-recovery examples.
+- Deterministic `http_malformed_json` injection with a fixed invalid JSON response, explicit
+  recovery evidence, and managed recovery and no-recovery demos.
 
 ## [0.1.0] - 2026-08-13
 

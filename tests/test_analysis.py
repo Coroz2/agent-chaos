@@ -366,3 +366,55 @@ def test_rate_limit_workload_failure_keeps_existing_precedence() -> None:
 
     assert result.result == ExperimentResult.FAILED
     assert result.reason_code == "WORKLOAD_EXIT_CODE_MISMATCH"
+
+
+@pytest.mark.parametrize(
+    ("include_success", "expected_result", "reason_code"),
+    [
+        (True, ExperimentResult.RECOVERED, "RECOVERY_OBSERVED"),
+        (False, ExperimentResult.FAILED, "RECOVERY_NOT_OBSERVED"),
+    ],
+)
+def test_malformed_json_recovery_requires_a_successful_linked_retry(
+    include_success: bool,
+    expected_result: ExperimentResult,
+    reason_code: str,
+) -> None:
+    payloads: list[EventPayload] = [
+        FaultInjectedPayload(
+            operation_id="failed-operation",
+            fault_type="http_malformed_json",
+            parameters={},
+        ),
+        OperationFailedPayload(
+            operation_id="failed-operation",
+            fingerprint="fingerprint",
+            failure_kind="injected_malformed_json",
+            status_code=200,
+            fault_related=True,
+        ),
+        RetryObservedPayload(
+            operation_id="retry-operation",
+            retry_of_operation_id="failed-operation",
+            fingerprint="fingerprint",
+            attempt=2,
+        ),
+    ]
+    if include_success:
+        payloads.append(
+            OperationSucceededPayload(
+                operation_id="retry-operation",
+                fingerprint="fingerprint",
+                status_code=200,
+                duration_ms=1,
+                fault_related=True,
+            )
+        )
+    payloads.append(
+        WorkloadCompletedPayload(exit_code=0, timed_out=False, interrupted=False, duration_ms=1)
+    )
+
+    result = analyze(scenario(), events(payloads))
+
+    assert result.result == expected_result
+    assert result.reason_code == reason_code

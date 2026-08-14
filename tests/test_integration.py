@@ -65,6 +65,24 @@ from agentchaos.runtime.orchestrator import run_experiment
             1,
             0,
         ),
+        (
+            "http_malformed_json_recovery.yaml",
+            ExperimentResult.RECOVERED,
+            "RECOVERY_OBSERVED",
+            0,
+            1,
+            1,
+            1,
+        ),
+        (
+            "http_malformed_json_failure.yaml",
+            ExperimentResult.FAILED,
+            "RECOVERY_NOT_OBSERVED",
+            1,
+            1,
+            1,
+            0,
+        ),
     ],
 )
 async def test_demo_scenarios_end_to_end(
@@ -96,3 +114,18 @@ async def test_demo_scenarios_end_to_end(
     if expected_result == ExperimentResult.RECOVERED:
         assert execution.report.recovery.observed
         assert execution.report.retries_observed >= 1
+    if filename == "http_malformed_json_recovery.yaml":
+        assert execution.report.reason_code == "RECOVERY_OBSERVED"
+        assert execution.report.fault.type == "http_malformed_json"
+        assert execution.report.faults_injected == 1
+        assert execution.report.failed_operations == 1
+        assert execution.report.retries_observed == 1
+        assert execution.report.recovery.failed_operation_id is not None
+        assert execution.report.recovery.retry_operation_id is not None
+    elif filename == "http_malformed_json_failure.yaml":
+        assert execution.report.reason_code == "RECOVERY_NOT_OBSERVED"
+        assert execution.report.fault.type == "http_malformed_json"
+        assert execution.report.faults_injected == 1
+        assert execution.report.failed_operations == 1
+        assert execution.report.retries_observed == 0
+        assert not execution.report.recovery.observed

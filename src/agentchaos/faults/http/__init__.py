@@ -8,6 +8,7 @@ from agentchaos.config.models import (
     FaultConfig,
     HttpErrorFault,
     HttpLatencyFault,
+    HttpMalformedJsonFault,
     HttpRateLimitFault,
 )
 from agentchaos.faults.http.base import (
@@ -19,6 +20,7 @@ from agentchaos.faults.http.base import (
 )
 from agentchaos.faults.http.error import HttpErrorExecutor
 from agentchaos.faults.http.latency import HttpLatencyExecutor
+from agentchaos.faults.http.malformed_json import HttpMalformedJsonExecutor
 from agentchaos.faults.http.rate_limit import HttpRateLimitExecutor
 from agentchaos.faults.http.target import HttpTargetMatcher
 
@@ -31,6 +33,8 @@ def build_http_fault_executor(fault: FaultConfig) -> HttpFaultExecutor:
         return HttpErrorExecutor.from_config(fault)
     if isinstance(fault, HttpRateLimitFault):
         return HttpRateLimitExecutor.from_config(fault)
+    if isinstance(fault, HttpMalformedJsonFault):
+        return HttpMalformedJsonExecutor.from_config(fault)
     assert_never(fault)
 
 

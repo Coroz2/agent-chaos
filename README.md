@@ -50,10 +50,12 @@ uv run agentchaos run examples/scenarios/api_latency_recovery.yaml
 uv run agentchaos run examples/scenarios/api_429_recovery.yaml
 uv run agentchaos run examples/scenarios/api_429_failure.yaml
 uv run agentchaos run examples/scenarios/api_503_failure.yaml
+uv run agentchaos run examples/scenarios/http_malformed_json_recovery.yaml
+uv run agentchaos run examples/scenarios/http_malformed_json_failure.yaml
 ```
 
-The 429 and 503 failure examples deliberately exit with status 1 because recovery is not
-observed.
+The 429, 503, and malformed-JSON failure examples deliberately exit with status 1 because
+recovery is not observed.
 
 ## Scenario
 
@@ -108,6 +110,24 @@ fault:
 
 The selected request receives HTTP 429 with an integer `Retry-After` value and
 `X-Agent-Chaos-Fault: http_rate_limit`; the upstream is not contacted for that request.
+
+To test application-level JSON handling despite a successful HTTP transport status, configure the
+fixed malformed-JSON fault:
+
+```yaml
+fault:
+  type: http_malformed_json
+  target:
+    method: GET
+    path: /customer/*
+  trigger:
+    occurrence: 2
+```
+
+On the selected occurrence, Agent Chaos returns status 200 with `Content-Type: application/json`,
+`X-Agent-Chaos-Fault: http_malformed_json`, and one fixed invalid JSON body. It does not contact
+the upstream or accept configurable response content. A matching retry that receives valid JSON
+is classified as recovery; exiting without a successful matching retry is a failed experiment.
 
 ## Results
 
@@ -190,9 +210,8 @@ It is useful black-box evidence, not proof of the workload's internal intent.
 
 ## Roadmap
 
-The next logical steps are richer HTTP failures such as malformed responses and connection resets,
-richer trigger policies and multi-fault campaigns, then another dependency adapter such as MCP.
-These are broad, nonbinding directions; detailed release scope begins only in an approved version
-specification.
+The next logical steps include connection resets, richer trigger policies and multi-fault
+campaigns, then another dependency adapter such as MCP. These are broad, nonbinding directions;
+detailed release scope begins only in an approved version specification.
 
 Licensed under Apache-2.0.

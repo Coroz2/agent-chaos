@@ -106,8 +106,14 @@ class HttpRateLimitFault(StrictModel):
     retry_after_seconds: int = Field(ge=0)
 
 
+class HttpMalformedJsonFault(StrictModel):
+    type: Literal["http_malformed_json"]
+    target: FaultTarget
+    trigger: OccurrenceTriggerConfig
+
+
 FaultConfig = Annotated[
-    HttpLatencyFault | HttpErrorFault | HttpRateLimitFault,
+    HttpLatencyFault | HttpErrorFault | HttpRateLimitFault | HttpMalformedJsonFault,
     Field(discriminator="type"),
 ]
 
