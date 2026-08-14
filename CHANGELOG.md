@@ -11,6 +11,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Read-only `agentchaos inspect` support for strictly validated saved reports, using the same
   result summary as live runs.
+- Deterministic `http_malformed_json` injection with a fixed invalid JSON response, explicit
+  recovery evidence, and managed recovery and no-recovery demos.
 
 ## [0.1.0] - 2026-08-13
 

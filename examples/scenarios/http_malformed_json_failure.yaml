@@ -1,0 +1,32 @@
+schema_version: 1
+name: http-malformed-json-no-recovery
+
+dependency:
+  type: http
+  base_url: http://127.0.0.1:19106
+  start:
+    command: [python, fake_api.py, --port, "19106"]
+    cwd: ..
+    readiness:
+      path: /health
+
+workload:
+  name: non-resilient-demo-agent
+  command: [python, demo_agent.py]
+  cwd: ..
+  env:
+    DEMO_MAX_ATTEMPTS: "1"
+  proxy_url_env: CUSTOMER_API_URL
+
+fault:
+  type: http_malformed_json
+  target:
+    method: GET
+    path: /customer/*
+  trigger:
+    occurrence: 2
+
+success:
+  exit_code: 1
+
+timeout_seconds: 10

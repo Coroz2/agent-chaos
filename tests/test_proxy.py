@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -12,7 +13,13 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from agentchaos.analysis.analyzer import analyze
-from agentchaos.config.models import FaultConfig, HttpErrorFault, HttpLatencyFault, Scenario
+from agentchaos.config.models import (
+    FaultConfig,
+    HttpErrorFault,
+    HttpLatencyFault,
+    HttpMalformedJsonFault,
+    Scenario,
+)
 from agentchaos.events.models import EventType, WorkloadCompletedPayload
 from agentchaos.events.recorder import EventRecorder
 from agentchaos.proxy import server as proxy_module
@@ -138,6 +145,67 @@ async def test_proxy_forwards_and_injects_http_error(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_proxy_injects_exact_malformed_json_without_contacting_upstream(
+    tmp_path: Path,
+) -> None:
+    fault = HttpMalformedJsonFault.model_validate(
+        {
+            "type": "http_malformed_json",
+            "target": {"method": "GET", "path": "/customer/*"},
+            "trigger": {"occurrence": 2},
+        }
+    )
+    UPSTREAM_PATHS.clear()
+    async with running_proxy(tmp_path, fault) as (proxy, recorder):
+        assert proxy.proxy_url is not None
+        async with httpx.AsyncClient(base_url=proxy.proxy_url, trust_env=False) as client:
+            first = await client.get("/customer/123")
+            injected_response = await client.get("/customer/123")
+            retry_response = await client.get("/customer/123")
+
+    assert first.status_code == 200
+    assert injected_response.status_code == 200
+    assert injected_response.content == b'{"error":"injected by Agent Chaos"'
+    assert injected_response.headers["content-type"] == "application/json"
+    assert injected_response.headers["x-agent-chaos-fault"] == "http_malformed_json"
+    with pytest.raises(json.JSONDecodeError):
+        injected_response.json()
+    assert retry_response.status_code == 200
+    assert UPSTREAM_PATHS == ["/customer/123", "/customer/123"]
+    assert [event.event_type for event in recorder.events] == [
+        EventType.OPERATION_OBSERVED,
+        EventType.OPERATION_SUCCEEDED,
+        EventType.OPERATION_OBSERVED,
+        EventType.FAULT_INJECTED,
+        EventType.OPERATION_FAILED,
+        EventType.OPERATION_OBSERVED,
+        EventType.RETRY_OBSERVED,
+        EventType.OPERATION_SUCCEEDED,
+    ]
+    injected = recorder.events[3].payload
+    failed = recorder.events[4].payload
+    assert injected.model_dump(mode="json") == {
+        "kind": "FAULT_INJECTED",
+        "operation_id": injected.operation_id,
+        "fault_type": "http_malformed_json",
+        "parameters": {},
+    }
+    assert failed.model_dump(mode="json") == {
+        "kind": "OPERATION_FAILED",
+        "operation_id": injected.operation_id,
+        "fingerprint": failed.fingerprint,
+        "failure_kind": "injected_malformed_json",
+        "status_code": 200,
+        "fault_related": True,
+    }
+    assert not any(
+        event.event_type == EventType.OPERATION_SUCCEEDED
+        and event.payload.operation_id == injected.operation_id
+        for event in recorder.events
+    )
+
+
+@pytest.mark.asyncio
 async def test_latency_fault_introduces_delay(tmp_path: Path) -> None:
     fault = HttpLatencyFault.model_validate(
         {
@@ -257,7 +325,7 @@ async def test_latency_retry_preserves_inferred_timeout_event_order(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("fault_type", ["http_latency", "http_error"])
+@pytest.mark.parametrize("fault_type", ["http_latency", "http_error", "http_malformed_json"])
 async def test_fault_injection_fires_once_under_concurrency(
     tmp_path: Path, fault_type: str
 ) -> None:
@@ -269,8 +337,10 @@ async def test_fault_injection_fires_once_under_concurrency(
     fault: FaultConfig
     if fault_type == "http_latency":
         fault = HttpLatencyFault.model_validate({**fault_data, "latency_ms": 100})
-    else:
+    elif fault_type == "http_error":
         fault = HttpErrorFault.model_validate({**fault_data, "status_code": 503})
+    else:
+        fault = HttpMalformedJsonFault.model_validate(fault_data)
 
     async with running_proxy(tmp_path, fault) as (proxy, recorder):
         assert proxy.proxy_url is not None
@@ -285,6 +355,14 @@ async def test_fault_injection_fires_once_under_concurrency(
     assert proxy.trigger.fired is True
     if fault_type == "http_error":
         assert sum(response.status_code == 503 for response in responses) == 1
+    elif fault_type == "http_malformed_json":
+        assert (
+            sum(
+                response.headers.get("x-agent-chaos-fault") == "http_malformed_json"
+                for response in responses
+            )
+            == 1
+        )
 
 
 @pytest.mark.asyncio
@@ -356,6 +434,73 @@ async def test_forwarding_and_artifacts_exclude_sensitive_http_data(tmp_path: Pa
         assert secret not in report_text
     assert hashlib.sha256(body_secret.encode()).hexdigest() in event_text
     assert hashlib.sha256(f"token={query_secret}".encode()).hexdigest() in event_text
+
+
+@pytest.mark.asyncio
+async def test_malformed_json_events_and_report_exclude_http_payload_data(tmp_path: Path) -> None:
+    header_secret = "malformed-header-secret-1a2b"
+    body_secret = "malformed-body-secret-3c4d"
+    query_secret = "malformed-query-secret-5e6f"
+    fault = HttpMalformedJsonFault.model_validate(
+        {
+            "type": "http_malformed_json",
+            "target": {"method": "POST", "path": "/echo"},
+            "trigger": {"occurrence": 1},
+        }
+    )
+    UPSTREAM_REQUESTS.clear()
+
+    async with running_proxy(tmp_path, fault) as (proxy, recorder):
+        assert proxy.proxy_url is not None
+        async with httpx.AsyncClient(base_url=proxy.proxy_url, trust_env=False) as client:
+            response = await client.post(
+                f"/echo?token={query_secret}",
+                content=body_secret,
+                headers={"Authorization": header_secret},
+            )
+        await recorder.emit(
+            "workload",
+            WorkloadCompletedPayload(
+                exit_code=0,
+                timed_out=False,
+                interrupted=False,
+                duration_ms=1,
+            ),
+        )
+        scenario = Scenario.model_validate(
+            {
+                "schema_version": 1,
+                "name": "safe-malformed-json-artifacts",
+                "dependency": {"type": "http", "base_url": "http://upstream"},
+                "workload": {"command": ["python", "agent.py"]},
+                "fault": fault.model_dump(mode="json"),
+                "success": {"exit_code": 0},
+            }
+        )
+        report = _build_report(
+            "run",
+            scenario,
+            analyze(scenario, recorder.events),
+            recorder.events,
+            managed_dependency=False,
+        )
+
+    assert response.status_code == 200
+    assert UPSTREAM_REQUESTS == []
+    event_text = (tmp_path / "events.jsonl").read_text(encoding="utf-8")
+    report_text = report.model_dump_json()
+    forbidden = (
+        header_secret,
+        body_secret,
+        query_secret,
+        '{"error":"injected by Agent Chaos"',
+        "X-Agent-Chaos-Fault",
+        "Content-Type",
+        "Authorization",
+    )
+    for value in forbidden:
+        assert value not in event_text
+        assert value not in report_text
 
 
 @pytest.mark.asyncio

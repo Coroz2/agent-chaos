@@ -99,7 +99,16 @@ class HttpErrorFault(StrictModel):
     status_code: int = Field(ge=400, le=599)
 
 
-FaultConfig = Annotated[HttpLatencyFault | HttpErrorFault, Field(discriminator="type")]
+class HttpMalformedJsonFault(StrictModel):
+    type: Literal["http_malformed_json"]
+    target: FaultTarget
+    trigger: OccurrenceTriggerConfig
+
+
+FaultConfig = Annotated[
+    HttpLatencyFault | HttpErrorFault | HttpMalformedJsonFault,
+    Field(discriminator="type"),
+]
 
 
 class SuccessConfig(StrictModel):

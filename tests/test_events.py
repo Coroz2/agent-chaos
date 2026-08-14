@@ -2,7 +2,12 @@ from pathlib import Path
 
 import pytest
 
-from agentchaos.events.models import Event, OperationObservedPayload, RunStartedPayload
+from agentchaos.events.models import (
+    Event,
+    FaultInjectedPayload,
+    OperationObservedPayload,
+    RunStartedPayload,
+)
 from agentchaos.events.recorder import EventRecorder
 
 
@@ -43,3 +48,18 @@ async def test_event_listener_receives_persisted_event(tmp_path: Path) -> None:
     recorder.close()
 
     assert received == [event]
+
+
+def test_fault_event_accepts_http_malformed_json_without_response_data() -> None:
+    payload = FaultInjectedPayload(
+        operation_id="operation-1",
+        fault_type="http_malformed_json",
+        parameters={},
+    )
+
+    assert payload.model_dump(mode="json") == {
+        "kind": "FAULT_INJECTED",
+        "operation_id": "operation-1",
+        "fault_type": "http_malformed_json",
+        "parameters": {},
+    }

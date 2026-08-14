@@ -25,6 +25,10 @@ success:
   exit_code: 0
 """
 
+MALFORMED_JSON_SCENARIO = VALID_SCENARIO.replace(
+    "type: http_error", "type: http_malformed_json"
+).replace("  status_code: 503\n", "")
+
 
 def write_scenario(tmp_path: Path, content: str) -> Path:
     path = tmp_path / "scenario.yaml"
@@ -39,6 +43,39 @@ def test_valid_scenario_parses_and_normalizes(tmp_path: Path) -> None:
     assert scenario.timeout_seconds == 60
     assert scenario.fault is not None
     assert scenario.fault.target.method == "GET"
+
+
+def test_http_malformed_json_scenario_accepts_only_common_fault_fields(tmp_path: Path) -> None:
+    scenario = load_scenario(write_scenario(tmp_path, MALFORMED_JSON_SCENARIO))
+
+    assert scenario.fault is not None
+    assert scenario.fault.type == "http_malformed_json"
+
+
+@pytest.mark.parametrize(
+    "extra_field",
+    [
+        "body: configurable",
+        "status_code: 201",
+        "headers: {X-Test: configurable}",
+    ],
+)
+def test_http_malformed_json_rejects_fault_specific_fields(
+    tmp_path: Path, extra_field: str
+) -> None:
+    invalid = MALFORMED_JSON_SCENARIO.replace(
+        "    occurrence: 2", f"    occurrence: 2\n  {extra_field}"
+    )
+
+    with pytest.raises(ScenarioLoadError, match="extra_forbidden"):
+        load_scenario(write_scenario(tmp_path, invalid))
+
+
+def test_legacy_malformed_json_discriminator_is_rejected(tmp_path: Path) -> None:
+    invalid = MALFORMED_JSON_SCENARIO.replace("http_malformed_json", "malformed_json")
+
+    with pytest.raises(ScenarioLoadError, match="union_tag_invalid"):
+        load_scenario(write_scenario(tmp_path, invalid))
 
 
 @pytest.mark.parametrize(

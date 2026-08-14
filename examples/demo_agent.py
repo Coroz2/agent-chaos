@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import time
@@ -31,7 +32,7 @@ def main() -> int:
                 customer = get_customer(client, base_url)
                 print(f"Refreshed customer {customer['id']} on attempt {attempt}", flush=True)
                 return 0
-            except (httpx.TimeoutException, httpx.HTTPStatusError) as error:
+            except (httpx.TimeoutException, httpx.HTTPStatusError, json.JSONDecodeError) as error:
                 print(f"Attempt {attempt} failed: {type(error).__name__}", flush=True)
                 if attempt == max_attempts:
                     return 1
