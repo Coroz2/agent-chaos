@@ -7,6 +7,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-13
+
 ### Added
 
 - Read-only `agentchaos inspect` support for strictly validated saved reports, using the same
@@ -15,6 +17,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   recovery evidence, and managed offline recovery and no-recovery examples.
 - Deterministic `http_malformed_json` injection with a fixed invalid JSON response, explicit
   recovery evidence, and managed recovery and no-recovery demos.
+
+### Changed
+
+- Modularized deterministic HTTP fault execution behind a private typed executor abstraction while
+  preserving existing v0.1 behavior and public contracts.
 
 ## [0.1.0] - 2026-08-13
 
@@ -42,5 +49,6 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   multiple simultaneous faults, or semantic task grading.
 - Retry classification is a deterministic black-box heuristic rather than proof of workload intent.
 
-[Unreleased]: https://github.com/Coroz2/agent-chaos/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Coroz2/agent-chaos/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/Coroz2/agent-chaos/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Coroz2/agent-chaos/releases/tag/v0.1.0

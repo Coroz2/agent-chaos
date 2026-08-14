@@ -45,8 +45,9 @@ Create and push an annotated tag from the release commit on `main` only after th
 complete:
 
 ```bash
-git tag -a v0.1.0 -m "Agent Chaos v0.1.0"
-git push origin v0.1.0
+VERSION=$(uv run python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+git tag -a "v$VERSION" -m "Agent Chaos v$VERSION"
+git push origin "v$VERSION"
 ```
 
 The release workflow validates the tag against package metadata, rebuilds and tests the package,

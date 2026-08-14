@@ -2,7 +2,7 @@
 
 The authoritative specification for the current released version is:
 
-- [Agent Chaos v0.1 Specification](specs/v0.1.md)
+- [Agent Chaos v0.2 Specification](specs/v0.2.md)
 
 This compatibility pointer preserves existing repository links. Released behavior is recorded in
 immutable versioned specifications under `docs/specs/`; project identity and long-term boundaries
