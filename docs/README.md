@@ -7,7 +7,8 @@ This directory separates stable project direction from released behavior and his
 | Document | Authority |
 | --- | --- |
 | [Project Vision](PROJECT-VISION.md) | Stable mission, audience, principles, capability families, and product boundaries. |
-| [v0.1 Specification](specs/v0.1.md) | Authoritative contract for the released v0.1 behavior. |
+| [v0.2 Specification](specs/v0.2.md) | Authoritative contract for the current released v0.2 behavior. |
+| [v0.1 Specification](specs/v0.1.md) | Immutable contract for the released v0.1 behavior. |
 | [Current Specification](PROJECT-SPEC.md) | Compatibility pointer to the latest released version specification. |
 | [Release Guide](RELEASING.md) | Packaging, tagging, publishing, and release-verification procedure. |
 | [Initial Plan](archive/INITIAL-PLAN.md) | Historical source material that motivated v0.1; not an active contract or roadmap. |

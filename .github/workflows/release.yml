@@ -81,10 +81,17 @@ jobs:
           uv pip install --python "$SMOKE_VENV/bin/python" --strict dist/*.whl
           test "$("$SMOKE_VENV/bin/agentchaos" --version)" = "agentchaos $EXPECTED_VERSION"
           "$SMOKE_VENV/bin/agentchaos" --help >/dev/null
-          "$SMOKE_VENV/bin/agentchaos" validate examples/scenarios/api_503_recovery.yaml
+          "$SMOKE_VENV/bin/agentchaos" validate examples/scenarios/api_429_recovery.yaml
+          RUNS_DIR="$RUNNER_TEMP/agentchaos-release-runs"
           PATH="$SMOKE_VENV/bin:$PATH" "$SMOKE_VENV/bin/agentchaos" run \
-            examples/scenarios/api_503_recovery.yaml \
-            --output-dir "$RUNNER_TEMP/agentchaos-release-runs"
+            examples/scenarios/api_429_recovery.yaml \
+            --output-dir "$RUNS_DIR"
+          REPORT_PATH=$(find "$RUNS_DIR" -name report.json -type f -print -quit)
+          test -n "$REPORT_PATH"
+          "$SMOKE_VENV/bin/python" -c \
+            'import json, sys; report = json.load(open(sys.argv[1])); assert (report["result"], report["reason_code"]) == ("RECOVERED", "RECOVERY_OBSERVED")' \
+            "$REPORT_PATH"
+          "$SMOKE_VENV/bin/agentchaos" inspect "$REPORT_PATH"
       - name: Prepare release artifacts
         run: |
           mkdir -p release/packages
