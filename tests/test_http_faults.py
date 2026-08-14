@@ -1,0 +1,90 @@
+import asyncio
+
+import pytest
+
+from agentchaos.config.models import FaultTarget, HttpErrorFault, HttpLatencyFault
+from agentchaos.faults.http import (
+    HttpFaultAction,
+    HttpFaultExecutionContext,
+    HttpTargetMatcher,
+    build_http_fault_executor,
+)
+
+
+def latency_fault(latency_ms: int = 1) -> HttpLatencyFault:
+    return HttpLatencyFault.model_validate(
+        {
+            "type": "http_latency",
+            "target": {"method": "GET", "path": "/customer/*"},
+            "trigger": {"occurrence": 1},
+            "latency_ms": latency_ms,
+        }
+    )
+
+
+def error_fault(status_code: int = 503) -> HttpErrorFault:
+    return HttpErrorFault.model_validate(
+        {
+            "type": "http_error",
+            "target": {"method": "GET", "path": "/customer/*"},
+            "trigger": {"occurrence": 1},
+            "status_code": status_code,
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_dispatches_latency_executor() -> None:
+    executor = build_http_fault_executor(latency_fault())
+    retry_seen = asyncio.Event()
+
+    outcome = await executor.execute(
+        HttpFaultExecutionContext(
+            retry_seen=retry_seen,
+            is_disconnected=_connected,
+        )
+    )
+
+    assert executor.fault_type == "http_latency"
+    assert executor.event_parameters() == {"latency_ms": 1}
+    assert outcome.action == HttpFaultAction.FORWARD
+    assert outcome.response is None
+    assert outcome.failure_kind is None
+    assert outcome.status_code is None
+
+
+@pytest.mark.asyncio
+async def test_dispatches_http_error_executor() -> None:
+    executor = build_http_fault_executor(error_fault())
+    retry_seen = asyncio.Event()
+
+    outcome = await executor.execute(
+        HttpFaultExecutionContext(
+            retry_seen=retry_seen,
+            is_disconnected=_connected,
+        )
+    )
+
+    assert executor.fault_type == "http_error"
+    assert executor.event_parameters() == {"status_code": 503}
+    assert outcome.action == HttpFaultAction.RESPOND
+    assert outcome.failure_kind == "injected_http_error"
+    assert outcome.status_code == 503
+    assert outcome.response is not None
+    assert outcome.response.status_code == 503
+    assert outcome.response.content == b'{"error":"injected by Agent Chaos"}'
+    assert outcome.response.headers == (("X-Agent-Chaos-Fault", "http_error"),)
+    assert outcome.response.media_type == "application/json"
+
+
+def test_http_target_matching_is_separate_from_triggering() -> None:
+    target = FaultTarget(method="GET", path="/customer/*")
+    matcher = HttpTargetMatcher.from_config(target)
+
+    assert matcher.matches("get", "/customer/123")
+    assert not matcher.matches("POST", "/customer/123")
+    assert not matcher.matches("GET", "/orders/123")
+
+
+async def _connected() -> bool:
+    return False
