@@ -35,6 +35,24 @@ def scenario(with_fault: bool = True) -> Scenario:
     )
 
 
+def rate_limit_scenario() -> Scenario:
+    return Scenario.model_validate(
+        {
+            "schema_version": 1,
+            "name": "rate-limit-analysis",
+            "dependency": {"type": "http", "base_url": "http://localhost:9000"},
+            "workload": {"command": ["python", "agent.py"]},
+            "fault": {
+                "type": "http_rate_limit",
+                "target": {"method": "GET", "path": "/customer/*"},
+                "trigger": {"occurrence": 1},
+                "retry_after_seconds": 1,
+            },
+            "success": {"exit_code": 0},
+        }
+    )
+
+
 def events(payloads: Iterable[EventPayload]) -> tuple[Event, ...]:
     return tuple(
         Event(
@@ -261,3 +279,90 @@ def test_recovery_metrics_and_identifiers_remain_unchanged() -> None:
     assert result.failed_operation_id == "failed-operation"
     assert result.retry_operation_id == "retry-operation"
     assert result.recovery_latency_ms == 20
+
+
+@pytest.mark.parametrize("successful_retry", [True, False])
+def test_rate_limit_recovery_requires_successful_fingerprint_matched_retry(
+    successful_retry: bool,
+) -> None:
+    payloads: list[EventPayload] = [
+        FaultInjectedPayload(
+            operation_id="failed-operation",
+            fault_type="http_rate_limit",
+            parameters={"retry_after_seconds": 1},
+        ),
+        OperationFailedPayload(
+            operation_id="failed-operation",
+            fingerprint="fingerprint",
+            failure_kind="injected_rate_limit",
+            status_code=429,
+            fault_related=True,
+        ),
+    ]
+    if successful_retry:
+        payloads.extend(
+            [
+                RetryObservedPayload(
+                    operation_id="retry-operation",
+                    retry_of_operation_id="failed-operation",
+                    fingerprint="fingerprint",
+                    attempt=2,
+                ),
+                OperationSucceededPayload(
+                    operation_id="retry-operation",
+                    fingerprint="fingerprint",
+                    status_code=200,
+                    duration_ms=1,
+                    fault_related=True,
+                ),
+            ]
+        )
+    payloads.append(
+        WorkloadCompletedPayload(
+            exit_code=0,
+            timed_out=False,
+            interrupted=False,
+            duration_ms=1,
+        )
+    )
+
+    result = analyze(rate_limit_scenario(), events(payloads))
+
+    assert result.result == (
+        ExperimentResult.RECOVERED if successful_retry else ExperimentResult.FAILED
+    )
+    assert result.reason_code == (
+        "RECOVERY_OBSERVED" if successful_retry else "RECOVERY_NOT_OBSERVED"
+    )
+    assert result.recovery_observed is successful_retry
+
+
+def test_rate_limit_workload_failure_keeps_existing_precedence() -> None:
+    result = analyze(
+        rate_limit_scenario(),
+        events(
+            [
+                FaultInjectedPayload(
+                    operation_id="failed-operation",
+                    fault_type="http_rate_limit",
+                    parameters={"retry_after_seconds": 1},
+                ),
+                OperationFailedPayload(
+                    operation_id="failed-operation",
+                    fingerprint="fingerprint",
+                    failure_kind="injected_rate_limit",
+                    status_code=429,
+                    fault_related=True,
+                ),
+                WorkloadCompletedPayload(
+                    exit_code=1,
+                    timed_out=False,
+                    interrupted=False,
+                    duration_ms=1,
+                ),
+            ]
+        ),
+    )
+
+    assert result.result == ExperimentResult.FAILED
+    assert result.reason_code == "WORKLOAD_EXIT_CODE_MISMATCH"

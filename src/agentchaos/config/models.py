@@ -99,7 +99,17 @@ class HttpErrorFault(StrictModel):
     status_code: int = Field(ge=400, le=599)
 
 
-FaultConfig = Annotated[HttpLatencyFault | HttpErrorFault, Field(discriminator="type")]
+class HttpRateLimitFault(StrictModel):
+    type: Literal["http_rate_limit"]
+    target: FaultTarget
+    trigger: OccurrenceTriggerConfig
+    retry_after_seconds: int = Field(ge=0)
+
+
+FaultConfig = Annotated[
+    HttpLatencyFault | HttpErrorFault | HttpRateLimitFault,
+    Field(discriminator="type"),
+]
 
 
 class SuccessConfig(StrictModel):

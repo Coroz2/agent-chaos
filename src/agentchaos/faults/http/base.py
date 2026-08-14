@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Literal, Protocol
 
-HttpFaultType = Literal["http_latency", "http_error"]
+HttpFaultType = Literal["http_latency", "http_error", "http_rate_limit"]
 
 
 class HttpFaultAction(StrEnum):

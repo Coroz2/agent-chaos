@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from typing import assert_never
 
-from agentchaos.config.models import FaultConfig, HttpErrorFault, HttpLatencyFault
+from agentchaos.config.models import (
+    FaultConfig,
+    HttpErrorFault,
+    HttpLatencyFault,
+    HttpRateLimitFault,
+)
 from agentchaos.faults.http.base import (
     HttpFaultAction,
     HttpFaultExecutionContext,
@@ -14,6 +19,7 @@ from agentchaos.faults.http.base import (
 )
 from agentchaos.faults.http.error import HttpErrorExecutor
 from agentchaos.faults.http.latency import HttpLatencyExecutor
+from agentchaos.faults.http.rate_limit import HttpRateLimitExecutor
 from agentchaos.faults.http.target import HttpTargetMatcher
 
 
@@ -23,6 +29,8 @@ def build_http_fault_executor(fault: FaultConfig) -> HttpFaultExecutor:
         return HttpLatencyExecutor.from_config(fault)
     if isinstance(fault, HttpErrorFault):
         return HttpErrorExecutor.from_config(fault)
+    if isinstance(fault, HttpRateLimitFault):
+        return HttpRateLimitExecutor.from_config(fault)
     assert_never(fault)
 
 
