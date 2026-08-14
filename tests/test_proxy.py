@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -10,23 +11,40 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from agentchaos.config.models import HttpErrorFault, HttpLatencyFault
-from agentchaos.events.models import EventType
+from agentchaos.analysis.analyzer import analyze
+from agentchaos.config.models import FaultConfig, HttpErrorFault, HttpLatencyFault, Scenario
+from agentchaos.events.models import EventType, WorkloadCompletedPayload
 from agentchaos.events.recorder import EventRecorder
 from agentchaos.proxy import server as proxy_module
 from agentchaos.proxy.server import ChaosProxy
+from agentchaos.runtime.orchestrator import _build_report
 
 UPSTREAM_PATHS: list[str] = []
+UPSTREAM_REQUESTS: list[dict[str, str]] = []
 
 
 async def echo(request: Request) -> JSONResponse:
+    body = await request.body()
     UPSTREAM_PATHS.append(request.url.path)
+    UPSTREAM_REQUESTS.append(
+        {
+            "method": request.method,
+            "path": request.url.path,
+            "query": request.url.query,
+            "body": body.decode(),
+            "authorization": request.headers.get("authorization", ""),
+            "host": request.headers.get("host", ""),
+            "te": request.headers.get("te", ""),
+            "x-test": request.headers.get("x-test", ""),
+        }
+    )
     return JSONResponse(
         {
             "method": request.method,
             "path": request.url.path,
             "header": request.headers.get("x-test"),
-        }
+        },
+        headers={"X-Upstream": "preserved", "Connection": "close"},
     )
 
 
@@ -44,7 +62,7 @@ UPSTREAM = Starlette(
 
 @asynccontextmanager
 async def running_proxy(
-    tmp_path: Path, fault: HttpErrorFault | HttpLatencyFault | None
+    tmp_path: Path, fault: FaultConfig | None
 ) -> AsyncIterator[tuple[ChaosProxy, EventRecorder]]:
     recorder = EventRecorder(tmp_path / "events.jsonl", "run")
     proxy = ChaosProxy("http://upstream", fault, recorder)
@@ -68,6 +86,7 @@ async def test_proxy_forwards_and_injects_http_error(tmp_path: Path) -> None:
             "status_code": 503,
         }
     )
+    UPSTREAM_PATHS.clear()
     async with running_proxy(tmp_path, fault) as (proxy, recorder):
         assert proxy.proxy_url is not None
         async with httpx.AsyncClient(base_url=proxy.proxy_url, trust_env=False) as client:
@@ -77,9 +96,45 @@ async def test_proxy_forwards_and_injects_http_error(tmp_path: Path) -> None:
 
     assert first.json()["header"] == "preserved"
     assert second.status_code == 503
+    assert second.content == b'{"error":"injected by Agent Chaos"}'
+    assert second.headers["content-type"] == "application/json"
     assert second.headers["x-agent-chaos-fault"] == "http_error"
     assert third.status_code == 200
-    assert any(event.event_type == EventType.RETRY_OBSERVED for event in recorder.events)
+    assert UPSTREAM_PATHS == ["/customer/123", "/customer/123"]
+    assert [event.event_type for event in recorder.events] == [
+        EventType.OPERATION_OBSERVED,
+        EventType.OPERATION_SUCCEEDED,
+        EventType.OPERATION_OBSERVED,
+        EventType.FAULT_INJECTED,
+        EventType.OPERATION_FAILED,
+        EventType.OPERATION_OBSERVED,
+        EventType.RETRY_OBSERVED,
+        EventType.OPERATION_SUCCEEDED,
+    ]
+    injected = recorder.events[3].payload
+    failed = recorder.events[4].payload
+    retry = recorder.events[6].payload
+    assert injected.model_dump(mode="json") == {
+        "kind": "FAULT_INJECTED",
+        "operation_id": injected.operation_id,
+        "fault_type": "http_error",
+        "parameters": {"status_code": 503},
+    }
+    assert failed.model_dump(mode="json") == {
+        "kind": "OPERATION_FAILED",
+        "operation_id": injected.operation_id,
+        "fingerprint": failed.fingerprint,
+        "failure_kind": "injected_http_error",
+        "status_code": 503,
+        "fault_related": True,
+    }
+    assert retry.model_dump(mode="json") == {
+        "kind": "RETRY_OBSERVED",
+        "operation_id": retry.operation_id,
+        "retry_of_operation_id": injected.operation_id,
+        "fingerprint": failed.fingerprint,
+        "attempt": 2,
+    }
 
 
 @pytest.mark.asyncio
@@ -104,6 +159,18 @@ async def test_latency_fault_introduces_delay(tmp_path: Path) -> None:
         event for event in recorder.events if event.event_type == EventType.OPERATION_SUCCEEDED
     ]
     assert successes[0].payload.duration_ms >= 45
+    assert [event.event_type for event in recorder.events] == [
+        EventType.OPERATION_OBSERVED,
+        EventType.FAULT_INJECTED,
+        EventType.OPERATION_SUCCEEDED,
+    ]
+    injected = recorder.events[1].payload
+    assert injected.model_dump(mode="json") == {
+        "kind": "FAULT_INJECTED",
+        "operation_id": injected.operation_id,
+        "fault_type": "http_latency",
+        "parameters": {"latency_ms": 50},
+    }
 
 
 @pytest.mark.asyncio
@@ -132,6 +199,163 @@ async def test_latency_fault_does_not_forward_after_disconnect(tmp_path: Path) -
         event for event in recorder.events if event.event_type == EventType.OPERATION_FAILED
     ]
     assert failures[0].payload.failure_kind == "client_disconnected"
+    assert [event.event_type for event in recorder.events] == [
+        EventType.OPERATION_OBSERVED,
+        EventType.FAULT_INJECTED,
+        EventType.OPERATION_FAILED,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_latency_retry_preserves_inferred_timeout_event_order(tmp_path: Path) -> None:
+    fault = HttpLatencyFault.model_validate(
+        {
+            "type": "http_latency",
+            "target": {"path": "/customer/*"},
+            "trigger": {"occurrence": 1},
+            "latency_ms": 250,
+        }
+    )
+    UPSTREAM_PATHS.clear()
+
+    async with running_proxy(tmp_path, fault) as (proxy, recorder):
+        assert proxy.proxy_url is not None
+        async with httpx.AsyncClient(base_url=proxy.proxy_url, trust_env=False) as client:
+            with pytest.raises(httpx.ReadTimeout):
+                await client.get("/customer/retry", timeout=0.05)
+            retry_response = await client.get("/customer/retry", timeout=2)
+        await asyncio.sleep(0.05)
+
+    assert retry_response.status_code == 200
+    assert UPSTREAM_PATHS == ["/customer/retry"]
+    assert [event.event_type for event in recorder.events] == [
+        EventType.OPERATION_OBSERVED,
+        EventType.FAULT_INJECTED,
+        EventType.OPERATION_OBSERVED,
+        EventType.OPERATION_FAILED,
+        EventType.RETRY_OBSERVED,
+        EventType.OPERATION_SUCCEEDED,
+    ]
+    injected = recorder.events[1].payload
+    inferred_failure = recorder.events[3].payload
+    retry = recorder.events[4].payload
+    assert inferred_failure.model_dump(mode="json") == {
+        "kind": "OPERATION_FAILED",
+        "operation_id": injected.operation_id,
+        "fingerprint": inferred_failure.fingerprint,
+        "failure_kind": "client_timeout_inferred",
+        "status_code": None,
+        "fault_related": True,
+    }
+    assert retry.model_dump(mode="json") == {
+        "kind": "RETRY_OBSERVED",
+        "operation_id": retry.operation_id,
+        "retry_of_operation_id": injected.operation_id,
+        "fingerprint": inferred_failure.fingerprint,
+        "attempt": 2,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fault_type", ["http_latency", "http_error"])
+async def test_fault_injection_fires_once_under_concurrency(
+    tmp_path: Path, fault_type: str
+) -> None:
+    fault_data = {
+        "type": fault_type,
+        "target": {"path": "/concurrent"},
+        "trigger": {"occurrence": 5},
+    }
+    fault: FaultConfig
+    if fault_type == "http_latency":
+        fault = HttpLatencyFault.model_validate({**fault_data, "latency_ms": 100})
+    else:
+        fault = HttpErrorFault.model_validate({**fault_data, "status_code": 503})
+
+    async with running_proxy(tmp_path, fault) as (proxy, recorder):
+        assert proxy.proxy_url is not None
+        async with httpx.AsyncClient(base_url=proxy.proxy_url, trust_env=False) as client:
+            responses = await asyncio.gather(*(client.get("/concurrent") for _ in range(20)))
+
+    injected = [event for event in recorder.events if event.event_type == EventType.FAULT_INJECTED]
+    assert len(injected) == 1
+    assert injected[0].payload.fault_type == fault_type
+    assert proxy.trigger is not None
+    assert proxy.trigger.count == 20
+    assert proxy.trigger.fired is True
+    if fault_type == "http_error":
+        assert sum(response.status_code == 503 for response in responses) == 1
+
+
+@pytest.mark.asyncio
+async def test_forwarding_and_artifacts_exclude_sensitive_http_data(tmp_path: Path) -> None:
+    header_secret = "raw-header-secret-9d67"
+    body_secret = "raw-body-secret-1f82"
+    query_secret = "raw-query-secret-7b31"
+    UPSTREAM_REQUESTS.clear()
+
+    async with running_proxy(tmp_path, None) as (proxy, recorder):
+        assert proxy.proxy_url is not None
+        async with httpx.AsyncClient(base_url=proxy.proxy_url, trust_env=False) as client:
+            response = await client.post(
+                f"/echo?token={query_secret}",
+                content=body_secret,
+                headers={
+                    "Authorization": header_secret,
+                    "Host": "request-host-must-not-forward",
+                    "TE": "trailers",
+                    "X-Test": "permitted-header",
+                },
+            )
+        await recorder.emit(
+            "workload",
+            WorkloadCompletedPayload(
+                exit_code=0,
+                timed_out=False,
+                interrupted=False,
+                duration_ms=1,
+            ),
+        )
+        scenario = Scenario.model_validate(
+            {
+                "schema_version": 1,
+                "name": "safe-http-artifacts",
+                "dependency": {"type": "http", "base_url": "http://upstream"},
+                "workload": {"command": ["python", "agent.py"]},
+                "success": {"exit_code": 0},
+            }
+        )
+        report = _build_report(
+            "run",
+            scenario,
+            analyze(scenario, recorder.events),
+            recorder.events,
+            managed_dependency=False,
+        )
+
+    assert response.status_code == 200
+    assert response.headers["x-upstream"] == "preserved"
+    assert "connection" not in response.headers
+    assert UPSTREAM_REQUESTS == [
+        {
+            "method": "POST",
+            "path": "/echo",
+            "query": f"token={query_secret}",
+            "body": body_secret,
+            "authorization": header_secret,
+            "host": "upstream",
+            "te": "",
+            "x-test": "permitted-header",
+        }
+    ]
+
+    event_text = (tmp_path / "events.jsonl").read_text(encoding="utf-8")
+    report_text = report.model_dump_json()
+    for secret in (header_secret, body_secret, query_secret, "request-host-must-not-forward"):
+        assert secret not in event_text
+        assert secret not in report_text
+    assert hashlib.sha256(body_secret.encode()).hexdigest() in event_text
+    assert hashlib.sha256(f"token={query_secret}".encode()).hexdigest() in event_text
 
 
 @pytest.mark.asyncio

@@ -209,3 +209,55 @@ def test_workload_failure_takes_precedence() -> None:
 
     assert result.result == ExperimentResult.FAILED
     assert result.reason_code == "WORKLOAD_EXIT_CODE_MISMATCH"
+
+
+def test_recovery_metrics_and_identifiers_remain_unchanged() -> None:
+    result = analyze(
+        scenario(),
+        events(
+            [
+                FaultInjectedPayload(
+                    operation_id="failed-operation",
+                    fault_type="http_error",
+                    parameters={"status_code": 503},
+                ),
+                OperationFailedPayload(
+                    operation_id="failed-operation",
+                    fingerprint="fingerprint",
+                    failure_kind="injected_http_error",
+                    status_code=503,
+                    fault_related=True,
+                ),
+                RetryObservedPayload(
+                    operation_id="retry-operation",
+                    retry_of_operation_id="failed-operation",
+                    fingerprint="fingerprint",
+                    attempt=2,
+                ),
+                OperationSucceededPayload(
+                    operation_id="retry-operation",
+                    fingerprint="fingerprint",
+                    status_code=200,
+                    duration_ms=1,
+                    fault_related=True,
+                ),
+                WorkloadCompletedPayload(
+                    exit_code=0,
+                    timed_out=False,
+                    interrupted=False,
+                    duration_ms=1,
+                ),
+            ]
+        ),
+    )
+
+    assert result.result == ExperimentResult.RECOVERED
+    assert result.reason_code == "RECOVERY_OBSERVED"
+    assert result.faults_injected == 1
+    assert result.successful_operations == 1
+    assert result.failed_operations == 1
+    assert result.retries_observed == 1
+    assert result.recovery_observed is True
+    assert result.failed_operation_id == "failed-operation"
+    assert result.retry_operation_id == "retry-operation"
+    assert result.recovery_latency_ms == 20

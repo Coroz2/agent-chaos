@@ -3,14 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-import re
 from dataclasses import dataclass, field
 
+from agentchaos.faults.http.target import path_matches
 
-def path_matches(pattern: str, path: str) -> bool:
-    """Match a path using only '*' as a wildcard."""
-    expression = re.escape(pattern).replace(r"\*", ".*")
-    return re.fullmatch(expression, path) is not None
+__all__ = ["OccurrenceTrigger", "path_matches"]
 
 
 @dataclass(slots=True)

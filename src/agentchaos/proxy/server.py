@@ -16,7 +16,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
-from agentchaos.config.models import FaultConfig, HttpErrorFault, HttpLatencyFault
+from agentchaos.config.models import FaultConfig
 from agentchaos.events.models import (
     FaultInjectedPayload,
     OperationFailedPayload,
@@ -25,7 +25,14 @@ from agentchaos.events.models import (
     RetryObservedPayload,
 )
 from agentchaos.events.recorder import EventRecorder
-from agentchaos.faults.trigger import OccurrenceTrigger, path_matches
+from agentchaos.faults.http import (
+    HttpFaultAction,
+    HttpFaultExecutionContext,
+    HttpFaultExecutor,
+    HttpTargetMatcher,
+    build_http_fault_executor,
+)
+from agentchaos.faults.trigger import OccurrenceTrigger
 
 MAX_BODY_BYTES = 10 * 1024 * 1024
 HOP_BY_HOP_HEADERS = {
@@ -65,6 +72,12 @@ class ChaosProxy:
         self.fault = fault
         self.recorder = recorder
         self.trigger = None if fault is None else OccurrenceTrigger(fault.trigger.occurrence)
+        self._target_matcher = (
+            None if fault is None else HttpTargetMatcher.from_config(fault.target)
+        )
+        self._fault_executor: HttpFaultExecutor | None = (
+            None if fault is None else build_http_fault_executor(fault)
+        )
         self._client = httpx.AsyncClient(follow_redirects=False, trust_env=False)
         self._state_lock = asyncio.Lock()
         self._fault_operation: FaultOperationState | None = None
@@ -164,40 +177,22 @@ class ChaosProxy:
         inject = await self._should_inject(request.method, path)
         fault_state: FaultOperationState | None = None
         if inject:
-            assert self.fault is not None
-            fault_state = FaultOperationState(operation_id, fingerprint, self.fault.type)
+            executor = self._fault_executor
+            assert executor is not None
+            fault_state = FaultOperationState(operation_id, fingerprint, executor.fault_type)
             async with self._state_lock:
                 self._fault_operation = fault_state
             await self.recorder.emit(
                 "proxy",
                 FaultInjectedPayload(
                     operation_id=operation_id,
-                    fault_type=self.fault.type,
-                    parameters=self._fault_parameters(self.fault),
+                    fault_type=executor.fault_type,
+                    parameters=executor.event_parameters(),
                 ),
             )
-            if isinstance(self.fault, HttpErrorFault):
-                fault_state.status = "failed"
-                await self._emit_failure(
-                    fault_state,
-                    failure_kind="injected_http_error",
-                    status_code=self.fault.status_code,
-                )
-                return JSONResponse(
-                    {"error": "injected by Agent Chaos"},
-                    status_code=self.fault.status_code,
-                    headers={"X-Agent-Chaos-Fault": "http_error"},
-                )
-            if isinstance(self.fault, HttpLatencyFault):
-                abandoned = await self._apply_latency(request, self.fault, fault_state)
-                if abandoned:
-                    if not fault_state.failure_emitted:
-                        await self._emit_failure(
-                            fault_state,
-                            failure_kind="client_disconnected",
-                            status_code=None,
-                        )
-                    return Response(status_code=499)
+            injected_response = await self._execute_fault(request, executor, fault_state)
+            if injected_response is not None:
+                return injected_response
 
         response = await self._forward(request, body)
         duration_ms = round((time.monotonic() - started) * 1000)
@@ -248,30 +243,50 @@ class ChaosProxy:
             state.retry_seen.set()
             return state, emit_inferred_failure
 
-    async def _apply_latency(
+    async def _execute_fault(
         self,
         request: Request,
-        fault: HttpLatencyFault,
+        executor: HttpFaultExecutor,
         state: FaultOperationState,
-    ) -> bool:
-        delay_task = asyncio.create_task(asyncio.sleep(fault.latency_ms / 1000))
-        retry_task = asyncio.create_task(state.retry_seen.wait())
-        done, pending = await asyncio.wait(
-            {delay_task, retry_task},
-            return_when=asyncio.FIRST_COMPLETED,
+    ) -> Response | None:
+        outcome = await executor.execute(
+            HttpFaultExecutionContext(
+                retry_seen=state.retry_seen,
+                is_disconnected=request.is_disconnected,
+            )
         )
-        for task in pending:
-            task.cancel()
-        await asyncio.gather(*pending, return_exceptions=True)
-        return retry_task in done or await request.is_disconnected()
+        if outcome.action == HttpFaultAction.FORWARD:
+            return None
+        if outcome.action == HttpFaultAction.ABANDON:
+            if not state.failure_emitted:
+                assert outcome.failure_kind is not None
+                await self._emit_failure(
+                    state,
+                    failure_kind=outcome.failure_kind,
+                    status_code=outcome.status_code,
+                )
+            return Response(status_code=499)
+
+        response = outcome.response
+        assert response is not None
+        assert outcome.failure_kind is not None
+        state.status = "failed"
+        await self._emit_failure(
+            state,
+            failure_kind=outcome.failure_kind,
+            status_code=outcome.status_code,
+        )
+        return Response(
+            content=response.content,
+            status_code=response.status_code,
+            headers=dict(response.headers),
+            media_type=response.media_type,
+        )
 
     async def _should_inject(self, method: str, path: str) -> bool:
-        if self.fault is None or self.trigger is None:
+        if self._target_matcher is None or self.trigger is None:
             return False
-        target = self.fault.target
-        if target.method is not None and target.method != method.upper():
-            return False
-        if not path_matches(target.path, path):
+        if not self._target_matcher.matches(method, path):
             return False
         return await self.trigger.evaluate()
 
@@ -361,9 +376,3 @@ class ChaosProxy:
     def _fingerprint(method: str, path: str, query_hash: str, body_hash: str) -> str:
         value = "\0".join((method.upper(), path, query_hash, body_hash)).encode()
         return hashlib.sha256(value).hexdigest()
-
-    @staticmethod
-    def _fault_parameters(fault: FaultConfig) -> dict[str, int]:
-        if isinstance(fault, HttpLatencyFault):
-            return {"latency_ms": fault.latency_ms}
-        return {"status_code": fault.status_code}
