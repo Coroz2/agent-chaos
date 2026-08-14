@@ -96,8 +96,10 @@ upstream already exists. Agent Chaos always exposes the generated proxy URL as
 - `RECOVERED`: a faulted operation fails, a matching retry succeeds, and the workload succeeds.
 - `FAILED`: execution fails, the fault never fires, or no successful recovery is observed.
 
-Successful and recovered experiments exit 0. Experiment failures exit 1, invalid scenarios exit
-2, setup failures exit 3, and interruptions exit 130.
+Successful and recovered experiments exit 0. Experiment failures exit 1, invalid scenarios and
+invalid saved reports exit 2, setup or unexpected internal failures exit 3, and interruptions exit
+130. Inspecting a structurally valid saved report exits 0 even when its recorded experiment result
+is `FAILED`.
 
 Every valid run contains:
 
@@ -123,9 +125,15 @@ uv run agentchaos --version
 uv run agentchaos version
 uv run agentchaos validate examples/scenarios/api_503_recovery.yaml
 uv run agentchaos run examples/scenarios/api_503_recovery.yaml
+uv run agentchaos inspect .agentchaos/runs/<run-id>
+uv run agentchaos inspect .agentchaos/runs/<run-id>/report.json
 ```
 
 Use `--output-dir PATH` to place run directories somewhere other than `.agentchaos/runs`.
+
+`inspect` accepts either a run directory or its `report.json` file and prints the same result
+summary as `run`. It strictly validates the saved report without running a workload, starting a
+dependency, contacting the network, reading other artifacts, or modifying the run directory.
 
 ## Documentation
 
@@ -134,6 +142,8 @@ Use `--output-dir PATH` to place run directories somewhere other than `.agentcha
 - [Documentation index](docs/README.md): authority map for specifications, release guidance, and
   archived planning.
 - [v0.1 specification](docs/specs/v0.1.md): complete contract for the released v0.1 behavior.
+- [v0.2 specification](docs/specs/v0.2.md): approved scope for saved-report inspection and richer
+  deterministic HTTP faults.
 
 ## Development
 
