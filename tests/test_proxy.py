@@ -12,7 +12,13 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from agentchaos.analysis.analyzer import analyze
-from agentchaos.config.models import FaultConfig, HttpErrorFault, HttpLatencyFault, Scenario
+from agentchaos.config.models import (
+    FaultConfig,
+    HttpErrorFault,
+    HttpLatencyFault,
+    HttpRateLimitFault,
+    Scenario,
+)
 from agentchaos.events.models import EventType, WorkloadCompletedPayload
 from agentchaos.events.recorder import EventRecorder
 from agentchaos.proxy import server as proxy_module
@@ -138,6 +144,78 @@ async def test_proxy_forwards_and_injects_http_error(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_proxy_injects_exact_rate_limit_response_without_contacting_upstream(
+    tmp_path: Path,
+) -> None:
+    fault = HttpRateLimitFault.model_validate(
+        {
+            "type": "http_rate_limit",
+            "target": {"method": "GET", "path": "/customer/*"},
+            "trigger": {"occurrence": 2},
+            "retry_after_seconds": 0,
+        }
+    )
+    header_secret = "rate-limit-header-secret"
+    body_secret = "rate-limit-body-secret"
+    query_secret = "rate-limit-query-secret"
+    UPSTREAM_PATHS.clear()
+    async with running_proxy(tmp_path, fault) as (proxy, recorder):
+        assert proxy.proxy_url is not None
+        async with httpx.AsyncClient(base_url=proxy.proxy_url, trust_env=False) as client:
+            request_kwargs = {
+                "content": body_secret,
+                "headers": {"Authorization": header_secret},
+            }
+            url = f"/customer/123?token={query_secret}"
+            first = await client.request("GET", url, **request_kwargs)
+            second = await client.request("GET", url, **request_kwargs)
+            third = await client.request("GET", url, **request_kwargs)
+
+    assert first.status_code == 200
+    assert second.status_code == 429
+    assert second.content == b'{"error": "rate limited by Agent Chaos"}'
+    assert second.headers["content-type"] == "application/json"
+    assert second.headers["retry-after"] == "0"
+    assert second.headers["x-agent-chaos-fault"] == "http_rate_limit"
+    assert third.status_code == 200
+    assert UPSTREAM_PATHS == ["/customer/123", "/customer/123"]
+    assert [event.event_type for event in recorder.events] == [
+        EventType.OPERATION_OBSERVED,
+        EventType.OPERATION_SUCCEEDED,
+        EventType.OPERATION_OBSERVED,
+        EventType.FAULT_INJECTED,
+        EventType.OPERATION_FAILED,
+        EventType.OPERATION_OBSERVED,
+        EventType.RETRY_OBSERVED,
+        EventType.OPERATION_SUCCEEDED,
+    ]
+    injected = recorder.events[3].payload
+    failed = recorder.events[4].payload
+    assert injected.model_dump(mode="json") == {
+        "kind": "FAULT_INJECTED",
+        "operation_id": injected.operation_id,
+        "fault_type": "http_rate_limit",
+        "parameters": {"retry_after_seconds": 0},
+    }
+    assert failed.model_dump(mode="json") == {
+        "kind": "OPERATION_FAILED",
+        "operation_id": injected.operation_id,
+        "fingerprint": failed.fingerprint,
+        "failure_kind": "injected_rate_limit",
+        "status_code": 429,
+        "fault_related": True,
+    }
+    event_text = (tmp_path / "events.jsonl").read_text(encoding="utf-8")
+    for secret in (
+        header_secret,
+        body_secret,
+        query_secret,
+        "rate limited by Agent Chaos",
+    ):
+        assert secret not in event_text
+
+
+@pytest.mark.asyncio
 async def test_latency_fault_introduces_delay(tmp_path: Path) -> None:
     fault = HttpLatencyFault.model_validate(
         {
@@ -257,7 +335,7 @@ async def test_latency_retry_preserves_inferred_timeout_event_order(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("fault_type", ["http_latency", "http_error"])
+@pytest.mark.parametrize("fault_type", ["http_latency", "http_error", "http_rate_limit"])
 async def test_fault_injection_fires_once_under_concurrency(
     tmp_path: Path, fault_type: str
 ) -> None:
@@ -269,8 +347,10 @@ async def test_fault_injection_fires_once_under_concurrency(
     fault: FaultConfig
     if fault_type == "http_latency":
         fault = HttpLatencyFault.model_validate({**fault_data, "latency_ms": 100})
-    else:
+    elif fault_type == "http_error":
         fault = HttpErrorFault.model_validate({**fault_data, "status_code": 503})
+    else:
+        fault = HttpRateLimitFault.model_validate({**fault_data, "retry_after_seconds": 1})
 
     async with running_proxy(tmp_path, fault) as (proxy, recorder):
         assert proxy.proxy_url is not None
@@ -285,6 +365,8 @@ async def test_fault_injection_fires_once_under_concurrency(
     assert proxy.trigger.fired is True
     if fault_type == "http_error":
         assert sum(response.status_code == 503 for response in responses) == 1
+    elif fault_type == "http_rate_limit":
+        assert sum(response.status_code == 429 for response in responses) == 1
 
 
 @pytest.mark.asyncio

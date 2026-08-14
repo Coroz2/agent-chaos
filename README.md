@@ -47,10 +47,13 @@ Other examples:
 ```bash
 uv run agentchaos run examples/scenarios/no_fault.yaml
 uv run agentchaos run examples/scenarios/api_latency_recovery.yaml
+uv run agentchaos run examples/scenarios/api_429_recovery.yaml
+uv run agentchaos run examples/scenarios/api_429_failure.yaml
 uv run agentchaos run examples/scenarios/api_503_failure.yaml
 ```
 
-The final command deliberately exits with status 1 because recovery is not observed.
+The 429 and 503 failure examples deliberately exit with status 1 because recovery is not
+observed.
 
 ## Scenario
 
@@ -89,6 +92,22 @@ success:
 The optional managed dependency is intended for local tests. Omit `dependency.start` when the
 upstream already exists. Agent Chaos always exposes the generated proxy URL as
 `AGENTCHAOS_PROXY_URL`; `proxy_url_env` maps it into the variable an existing workload expects.
+
+The current development line also supports deterministic HTTP rate-limit injection:
+
+```yaml
+fault:
+  type: http_rate_limit
+  target:
+    method: GET
+    path: /customer/*
+  trigger:
+    occurrence: 2
+  retry_after_seconds: 1
+```
+
+The selected request receives HTTP 429 with an integer `Retry-After` value and
+`X-Agent-Chaos-Fault: http_rate_limit`; the upstream is not contacted for that request.
 
 ## Results
 
@@ -160,9 +179,9 @@ workflow.
 
 ## Limitations
 
-v0.1 supports one HTTP dependency and zero or one fault on macOS and Linux. It is a reverse proxy,
-not transparent network interception: the workload must accept the proxy base URL through its
-configuration. Request bodies and responses are buffered up to 10 MiB. Streaming, SSE,
+Agent Chaos supports one HTTP dependency and zero or one fault on macOS and Linux. It is a reverse
+proxy, not transparent network interception: the workload must accept the proxy base URL through
+its configuration. Request bodies and responses are buffered up to 10 MiB. Streaming, SSE,
 WebSockets, CONNECT tunneling, TLS interception, multiple faults, probabilistic triggers, and
 model-specific grading are not implemented.
 
@@ -171,8 +190,9 @@ It is useful black-box evidence, not proof of the workload's internal intent.
 
 ## Roadmap
 
-The next logical steps are richer HTTP failures such as 429s and connection resets, richer trigger
-policies and multi-fault campaigns, then another dependency adapter such as MCP. These are broad,
-nonbinding directions; detailed release scope begins only in an approved version specification.
+The next logical steps are richer HTTP failures such as malformed responses and connection resets,
+richer trigger policies and multi-fault campaigns, then another dependency adapter such as MCP.
+These are broad, nonbinding directions; detailed release scope begins only in an approved version
+specification.
 
 Licensed under Apache-2.0.

@@ -11,6 +11,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Read-only `agentchaos inspect` support for strictly validated saved reports, using the same
   result summary as live runs.
+- Deterministic HTTP 429 rate-limit injection with integer `Retry-After` values, structured
+  recovery evidence, and managed offline recovery and no-recovery examples.
 
 ## [0.1.0] - 2026-08-13
 
