@@ -72,7 +72,7 @@ class OperationObservedPayload(Payload):
 class FaultInjectedPayload(Payload):
     kind: Literal[EventType.FAULT_INJECTED] = EventType.FAULT_INJECTED
     operation_id: str
-    fault_type: Literal["http_latency", "http_error"]
+    fault_type: Literal["http_latency", "http_error", "http_rate_limit", "http_malformed_json"]
     parameters: dict[str, int]
 
 
