@@ -7,6 +7,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Read-only `agentchaos inspect` support for strictly validated saved reports, using the same
+  result summary as live runs.
+
 ## [0.1.0] - 2026-08-13
 
 ### Added
@@ -35,4 +40,3 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 [Unreleased]: https://github.com/Coroz2/agent-chaos/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/Coroz2/agent-chaos/releases/tag/v0.1.0
-

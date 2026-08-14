@@ -19,7 +19,9 @@ from agentchaos.events.models import (
     OperationSucceededPayload,
     RetryObservedPayload,
 )
-from agentchaos.runtime.orchestrator import RunExecution, run_experiment
+from agentchaos.reporting.reader import ReportReadError, load_report
+from agentchaos.reporting.summary import render_summary
+from agentchaos.runtime.orchestrator import run_experiment
 
 app = typer.Typer(no_args_is_help=True, add_completion=False, pretty_exceptions_enable=False)
 
@@ -58,6 +60,23 @@ def validate(scenario: Annotated[Path, typer.Argument(exists=True, dir_okay=Fals
 
 
 @app.command()
+def inspect(report_input: Annotated[Path, typer.Argument()]) -> None:
+    """Inspect a saved run report without modifying its artifacts."""
+    try:
+        report, report_path = load_report(report_input)
+    except KeyboardInterrupt as error:
+        raise typer.Exit(130) from error
+    except ReportReadError as error:
+        typer.echo(f"Cannot inspect report: {error}", err=True)
+        raise typer.Exit(2) from error
+    except Exception as error:
+        typer.echo("Agent Chaos inspect failed: unexpected internal error", err=True)
+        raise typer.Exit(3) from error
+
+    typer.echo(render_summary(report, report_path), nl=False)
+
+
+@app.command()
 def run(
     scenario: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
     output_dir: Annotated[
@@ -91,7 +110,8 @@ def run(
         typer.echo(f"Agent Chaos failed: {error}", err=True)
         raise typer.Exit(3) from error
 
-    _render_summary(execution)
+    report_path = (execution.run_dir / "report.json").resolve()
+    typer.echo(render_summary(execution.report, report_path), nl=False)
     raise typer.Exit(execution.exit_code)
 
 
@@ -114,19 +134,6 @@ def _render_event(event: Event) -> None:
         payload, OperationSucceededPayload
     ):
         typer.echo(f"{prefix}  SUCCESS        {payload.status_code}")
-
-
-def _render_summary(execution: RunExecution) -> None:
-    report = execution.report
-    typer.echo("\nExperiment complete.\n")
-    typer.echo(f"Result: {report.result.value}")
-    typer.echo(f"Reason: {report.reason_code}\n")
-    typer.echo(f"Faults injected:       {report.faults_injected}")
-    typer.echo(f"Failed operations:     {report.failed_operations}")
-    typer.echo(f"Retries:               {report.retries_observed}")
-    typer.echo(f"Successful recovery:   {'yes' if report.recovery.observed else 'no'}")
-    typer.echo(f"Duration:              {report.duration_ms / 1000:.2f}s")
-    typer.echo(f"\nReport:\n{execution.run_dir / 'report.json'}")
 
 
 if __name__ == "__main__":
