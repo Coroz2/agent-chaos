@@ -96,7 +96,7 @@ jobs:
         run: |
           mkdir -p release/packages
           cp dist/*.whl dist/*.tar.gz release/packages/
-          sha256sum release/packages/* > release/SHA256SUMS
+          (cd release/packages && sha256sum * > ../SHA256SUMS)
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-dists
