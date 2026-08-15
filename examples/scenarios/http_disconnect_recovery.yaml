@@ -14,6 +14,8 @@ workload:
   name: demo-agent
   command: [python, demo_agent.py]
   cwd: ..
+  env:
+    DEMO_TIMEOUT_MS: "1000"
   proxy_url_env: CUSTOMER_API_URL
 
 fault:
