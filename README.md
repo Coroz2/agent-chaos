@@ -50,12 +50,14 @@ uv run agentchaos run examples/scenarios/api_latency_recovery.yaml
 uv run agentchaos run examples/scenarios/api_429_recovery.yaml
 uv run agentchaos run examples/scenarios/api_429_failure.yaml
 uv run agentchaos run examples/scenarios/api_503_failure.yaml
+uv run agentchaos run examples/scenarios/http_disconnect_recovery.yaml
+uv run agentchaos run examples/scenarios/http_disconnect_failure.yaml
 uv run agentchaos run examples/scenarios/http_malformed_json_recovery.yaml
 uv run agentchaos run examples/scenarios/http_malformed_json_failure.yaml
 ```
 
-The 429, 503, and malformed-JSON failure examples deliberately exit with status 1 because
-recovery is not observed.
+The 429, 503, disconnect, and malformed-JSON failure examples deliberately exit with status 1
+because recovery is not observed.
 
 ## Scenario
 
@@ -129,11 +131,31 @@ On the selected occurrence, Agent Chaos returns status 200 with `Content-Type: a
 the upstream or accept configurable response content. A matching retry that receives valid JSON
 is classified as recovery; exiting without a successful matching retry is a failed experiment.
 
+To test recovery from an abruptly terminated HTTP connection, configure the disconnect fault:
+
+```yaml
+fault:
+  type: http_disconnect
+  target:
+    method: GET
+    path: /customer/*
+  trigger:
+    occurrence: 2
+```
+
+Agent Chaos does not forward the selected request upstream and terminates the client connection
+before a complete response arrives. The portable guarantee is a client-visible transport or HTTP
+protocol failure; a literal TCP reset and a particular client-library exception are not
+guaranteed. A matching retry that succeeds through the upstream is classified as recovery.
+
 ## Results
 
 - `PASSED`: a baseline succeeds, or the workload tolerates injected latency without failure.
 - `RECOVERED`: a faulted operation fails, a matching retry succeeds, and the workload succeeds.
 - `FAILED`: execution fails, the fault never fires, or no successful recovery is observed.
+
+An injected disconnect always records a failed operation. It produces `RECOVERED` only when a
+matching retry succeeds; an expected workload exit without that retry produces `FAILED`.
 
 Successful and recovered experiments exit 0. Experiment failures exit 1, invalid scenarios and
 invalid saved reports exit 2, setup or unexpected internal failures exit 3, and interruptions exit
@@ -200,7 +222,8 @@ workflow.
 
 Agent Chaos supports one HTTP dependency and zero or one fault on macOS and Linux. It is a reverse
 proxy, not transparent network interception: the workload must accept the proxy base URL through
-its configuration. Request bodies and responses are buffered up to 10 MiB. Streaming, SSE,
+its configuration. Request bodies and responses are buffered up to 10 MiB. Disconnect injection
+does not provide packet-level reset controls or partial-response faults. Streaming, SSE,
 WebSockets, CONNECT tunneling, TLS interception, multiple faults, probabilistic triggers, and
 model-specific grading are not implemented.
 
@@ -209,8 +232,8 @@ It is useful black-box evidence, not proof of the workload's internal intent.
 
 ## Roadmap
 
-The next logical steps include connection resets, richer trigger policies and multi-fault
-campaigns, then another dependency adapter such as MCP. These are broad, nonbinding directions;
-detailed release scope begins only in an approved version specification.
+The next logical steps include richer trigger policies and multi-fault campaigns, then another
+dependency adapter such as MCP. These are broad, nonbinding directions; detailed release scope
+begins only in an approved version specification.
 
 Licensed under Apache-2.0.

@@ -1,10 +1,14 @@
 from pathlib import Path
 
 import pytest
+from typer.testing import CliRunner
 
 from agentchaos.analysis.analyzer import ExperimentResult
+from agentchaos.cli import app
 from agentchaos.config.loader import load_scenario
 from agentchaos.runtime.orchestrator import run_experiment
+
+runner = CliRunner()
 
 
 @pytest.mark.asyncio
@@ -83,6 +87,24 @@ from agentchaos.runtime.orchestrator import run_experiment
             1,
             0,
         ),
+        (
+            "http_disconnect_recovery.yaml",
+            ExperimentResult.RECOVERED,
+            "RECOVERY_OBSERVED",
+            0,
+            1,
+            1,
+            1,
+        ),
+        (
+            "http_disconnect_failure.yaml",
+            ExperimentResult.FAILED,
+            "RECOVERY_NOT_OBSERVED",
+            1,
+            1,
+            1,
+            0,
+        ),
     ],
 )
 async def test_demo_scenarios_end_to_end(
@@ -129,3 +151,29 @@ async def test_demo_scenarios_end_to_end(
         assert execution.report.failed_operations == 1
         assert execution.report.retries_observed == 0
         assert not execution.report.recovery.observed
+    elif filename == "http_disconnect_recovery.yaml":
+        assert execution.report.reason_code == "RECOVERY_OBSERVED"
+        assert execution.report.fault.type == "http_disconnect"
+        assert execution.report.faults_injected == 1
+        assert execution.report.failed_operations == 1
+        assert execution.report.retries_observed == 1
+        assert execution.report.recovery.observed
+        assert execution.report.recovery.failed_operation_id is not None
+        assert execution.report.recovery.retry_operation_id is not None
+        inspection = runner.invoke(app, ["inspect", str(execution.run_dir)])
+        assert inspection.exit_code == 0
+        assert "Result: RECOVERED" in inspection.output
+        assert "Reason: RECOVERY_OBSERVED" in inspection.output
+    elif filename == "http_disconnect_failure.yaml":
+        assert execution.report.reason_code == "RECOVERY_NOT_OBSERVED"
+        assert execution.report.fault.type == "http_disconnect"
+        assert execution.report.faults_injected == 1
+        assert execution.report.failed_operations == 1
+        assert execution.report.retries_observed == 0
+        assert not execution.report.recovery.observed
+        assert execution.report.recovery.failed_operation_id is not None
+        assert execution.report.recovery.retry_operation_id is None
+        inspection = runner.invoke(app, ["inspect", str(execution.run_dir)])
+        assert inspection.exit_code == 0
+        assert "Result: FAILED" in inspection.output
+        assert "Reason: RECOVERY_NOT_OBSERVED" in inspection.output
