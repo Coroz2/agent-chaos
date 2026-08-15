@@ -6,7 +6,7 @@ AI agents increasingly depend on unreliable model APIs, tools, databases, and HT
 Agent Chaos intentionally disrupts those dependencies so developers can measure whether an
 agent-like workload tolerates a fault, retries successfully, or fails.
 
-Agent Chaos v0.2 is an early open-source vertical slice. It is framework-independent and does
+Agent Chaos v0.3 is an early open-source vertical slice. It is framework-independent and does
 not require an OpenAI or Anthropic API key.
 
 ```mermaid
@@ -97,7 +97,7 @@ The optional managed dependency is intended for local tests. Omit `dependency.st
 upstream already exists. Agent Chaos always exposes the generated proxy URL as
 `AGENTCHAOS_PROXY_URL`; `proxy_url_env` maps it into the variable an existing workload expects.
 
-Agent Chaos v0.2 also supports deterministic HTTP rate-limit injection:
+Agent Chaos also supports deterministic HTTP rate-limit injection:
 
 ```yaml
 fault:
@@ -202,7 +202,8 @@ dependency, contacting the network, reading other artifacts, or modifying the ru
   boundaries.
 - [Documentation index](docs/README.md): authority map for specifications, release guidance, and
   archived planning.
-- [v0.2 specification](docs/specs/v0.2.md): complete contract for the current released behavior.
+- [v0.3 specification](docs/specs/v0.3.md): complete contract for the current released behavior.
+- [v0.2 specification](docs/specs/v0.2.md): immutable contract for the prior release.
 - [v0.1 specification](docs/specs/v0.1.md): immutable contract for the initial release.
 
 ## Development
