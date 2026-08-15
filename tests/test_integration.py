@@ -125,7 +125,7 @@ async def test_demo_scenarios_end_to_end(
         stream_output=False,
     )
 
-    assert execution.report.result == expected_result
+    assert execution.report.result == expected_result, execution.report.model_dump_json(indent=2)
     assert execution.report.reason_code == expected_reason
     assert execution.exit_code == expected_exit
     assert execution.report.faults_injected == expected_faults

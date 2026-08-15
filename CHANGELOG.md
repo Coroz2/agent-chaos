@@ -14,6 +14,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Deterministic `http_disconnect` injection with structured recovery evidence and managed offline
   recovery and no-recovery examples.
 
+### Fixed
+
+- Increased the managed HTTP-disconnect recovery example's client timeout so connection teardown
+  and retry remain reliable on slower macOS CI runners.
+
 ## [0.2.0] - 2026-08-13
 
 ### Added
