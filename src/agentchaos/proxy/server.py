@@ -7,6 +7,7 @@ import hashlib
 import socket
 import time
 from dataclasses import dataclass, field
+from typing import cast
 from uuid import uuid4
 
 import httpx
@@ -33,6 +34,11 @@ from agentchaos.faults.http import (
     build_http_fault_executor,
 )
 from agentchaos.faults.trigger import OccurrenceTrigger
+from agentchaos.proxy.protocol import (
+    TRANSPORT_ABORT_STATE_KEY,
+    AgentChaosH11Protocol,
+    TransportAbort,
+)
 
 MAX_BODY_BYTES = 10 * 1024 * 1024
 HOP_BY_HOP_HEADERS = {
@@ -109,6 +115,7 @@ class ChaosProxy:
             log_level="error",
             access_log=False,
             lifespan="off",
+            http=AgentChaosH11Protocol,
         )
         self._server = uvicorn.Server(config)
         self._server_task = asyncio.create_task(self._server.serve(sockets=[self._socket]))
@@ -266,6 +273,19 @@ class ChaosProxy:
                     status_code=outcome.status_code,
                 )
             return Response(status_code=499)
+        if outcome.action == HttpFaultAction.DISCONNECT:
+            assert outcome.failure_kind is not None
+            state.status = "failed"
+            await self._emit_failure(
+                state,
+                failure_kind=outcome.failure_kind,
+                status_code=outcome.status_code,
+            )
+            abort_transport = request.scope["state"].get(TRANSPORT_ABORT_STATE_KEY)
+            if not callable(abort_transport):
+                raise RuntimeError("active HTTP transport abort callback is unavailable")
+            cast(TransportAbort, abort_transport)()
+            return Response(status_code=204)
 
         response = outcome.response
         assert response is not None

@@ -5,6 +5,7 @@ import pytest
 
 from agentchaos.config.models import (
     FaultTarget,
+    HttpDisconnectFault,
     HttpErrorFault,
     HttpLatencyFault,
     HttpMalformedJsonFault,
@@ -55,6 +56,16 @@ def malformed_json_fault() -> HttpMalformedJsonFault:
     return HttpMalformedJsonFault.model_validate(
         {
             "type": "http_malformed_json",
+            "target": {"method": "GET", "path": "/customer/*"},
+            "trigger": {"occurrence": 1},
+        }
+    )
+
+
+def disconnect_fault() -> HttpDisconnectFault:
+    return HttpDisconnectFault.model_validate(
+        {
+            "type": "http_disconnect",
             "target": {"method": "GET", "path": "/customer/*"},
             "trigger": {"occurrence": 1},
         }
@@ -154,6 +165,25 @@ async def test_dispatches_http_malformed_json_executor() -> None:
     assert outcome.response.media_type == "application/json"
     with pytest.raises(json.JSONDecodeError):
         json.loads(outcome.response.content)
+
+
+@pytest.mark.asyncio
+async def test_dispatches_http_disconnect_executor() -> None:
+    executor = build_http_fault_executor(disconnect_fault())
+
+    outcome = await executor.execute(
+        HttpFaultExecutionContext(
+            retry_seen=asyncio.Event(),
+            is_disconnected=_connected,
+        )
+    )
+
+    assert executor.fault_type == "http_disconnect"
+    assert executor.event_parameters() == {}
+    assert outcome.action == HttpFaultAction.DISCONNECT
+    assert outcome.failure_kind == "injected_disconnect"
+    assert outcome.status_code is None
+    assert outcome.response is None
 
 
 def test_http_target_matching_is_separate_from_triggering() -> None:

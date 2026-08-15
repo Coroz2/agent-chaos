@@ -6,6 +6,7 @@ from typing import assert_never
 
 from agentchaos.config.models import (
     FaultConfig,
+    HttpDisconnectFault,
     HttpErrorFault,
     HttpLatencyFault,
     HttpMalformedJsonFault,
@@ -18,6 +19,7 @@ from agentchaos.faults.http.base import (
     HttpFaultOutcome,
     SyntheticHttpResponse,
 )
+from agentchaos.faults.http.disconnect import HttpDisconnectExecutor
 from agentchaos.faults.http.error import HttpErrorExecutor
 from agentchaos.faults.http.latency import HttpLatencyExecutor
 from agentchaos.faults.http.malformed_json import HttpMalformedJsonExecutor
@@ -35,6 +37,8 @@ def build_http_fault_executor(fault: FaultConfig) -> HttpFaultExecutor:
         return HttpRateLimitExecutor.from_config(fault)
     if isinstance(fault, HttpMalformedJsonFault):
         return HttpMalformedJsonExecutor.from_config(fault)
+    if isinstance(fault, HttpDisconnectFault):
+        return HttpDisconnectExecutor.from_config(fault)
     assert_never(fault)
 
 
