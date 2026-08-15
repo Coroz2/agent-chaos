@@ -15,6 +15,7 @@ from starlette.routing import Route
 from agentchaos.analysis.analyzer import analyze
 from agentchaos.config.models import (
     FaultConfig,
+    HttpDisconnectFault,
     HttpErrorFault,
     HttpLatencyFault,
     HttpMalformedJsonFault,
@@ -24,6 +25,7 @@ from agentchaos.config.models import (
 from agentchaos.events.models import EventType, WorkloadCompletedPayload
 from agentchaos.events.recorder import EventRecorder
 from agentchaos.proxy import server as proxy_module
+from agentchaos.proxy.protocol import AgentChaosH11Protocol
 from agentchaos.proxy.server import ChaosProxy
 from agentchaos.runtime.orchestrator import _build_report
 
@@ -279,6 +281,98 @@ async def test_proxy_injects_exact_malformed_json_without_contacting_upstream(
 
 
 @pytest.mark.asyncio
+async def test_proxy_disconnects_without_contacting_upstream_and_records_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    fault = HttpDisconnectFault.model_validate(
+        {
+            "type": "http_disconnect",
+            "target": {"method": "GET", "path": "/customer/*"},
+            "trigger": {"occurrence": 2},
+        }
+    )
+    header_secret = "disconnect-header-secret-7a8b"
+    body_secret = "disconnect-body-secret-9c0d"
+    query_secret = "disconnect-query-secret-1e2f"
+    UPSTREAM_PATHS.clear()
+    events_at_abort: list[EventType] = []
+    original_abort = AgentChaosH11Protocol._abort_transport
+
+    async with running_proxy(tmp_path, fault) as (proxy, recorder):
+        assert proxy.proxy_url is not None
+        assert proxy._server is not None
+        assert proxy._server.config.http_protocol_class is AgentChaosH11Protocol
+
+        def record_then_abort(protocol: AgentChaosH11Protocol) -> None:
+            events_at_abort.extend(event.event_type for event in recorder.events)
+            original_abort(protocol)
+
+        monkeypatch.setattr(AgentChaosH11Protocol, "_abort_transport", record_then_abort)
+        async with httpx.AsyncClient(base_url=proxy.proxy_url, trust_env=False) as client:
+            request_kwargs = {
+                "content": body_secret,
+                "headers": {"Authorization": header_secret},
+            }
+            url = f"/customer/123?token={query_secret}"
+            first = await client.request("GET", url, **request_kwargs)
+            with pytest.raises(httpx.TransportError):
+                await client.request("GET", url, **request_kwargs)
+            retry_response = await client.request("GET", url, **request_kwargs)
+
+    assert first.status_code == 200
+    assert retry_response.status_code == 200
+    assert events_at_abort[-2:] == [EventType.FAULT_INJECTED, EventType.OPERATION_FAILED]
+    assert UPSTREAM_PATHS == ["/customer/123", "/customer/123"]
+    assert [event.event_type for event in recorder.events] == [
+        EventType.OPERATION_OBSERVED,
+        EventType.OPERATION_SUCCEEDED,
+        EventType.OPERATION_OBSERVED,
+        EventType.FAULT_INJECTED,
+        EventType.OPERATION_FAILED,
+        EventType.OPERATION_OBSERVED,
+        EventType.RETRY_OBSERVED,
+        EventType.OPERATION_SUCCEEDED,
+    ]
+    injected = recorder.events[3].payload
+    failed = recorder.events[4].payload
+    retry = recorder.events[6].payload
+    assert injected.model_dump(mode="json") == {
+        "kind": "FAULT_INJECTED",
+        "operation_id": injected.operation_id,
+        "fault_type": "http_disconnect",
+        "parameters": {},
+    }
+    assert failed.model_dump(mode="json") == {
+        "kind": "OPERATION_FAILED",
+        "operation_id": injected.operation_id,
+        "fingerprint": failed.fingerprint,
+        "failure_kind": "injected_disconnect",
+        "status_code": None,
+        "fault_related": True,
+    }
+    assert retry.model_dump(mode="json") == {
+        "kind": "RETRY_OBSERVED",
+        "operation_id": retry.operation_id,
+        "retry_of_operation_id": injected.operation_id,
+        "fingerprint": failed.fingerprint,
+        "attempt": 2,
+    }
+    assert not any(
+        event.event_type == EventType.OPERATION_SUCCEEDED
+        and event.payload.operation_id == injected.operation_id
+        for event in recorder.events
+    )
+    event_text = (tmp_path / "events.jsonl").read_text(encoding="utf-8")
+    for secret in (header_secret, body_secret, query_secret, "Authorization"):
+        assert secret not in event_text
+    assert not any(
+        record.name == "uvicorn.error" and record.exc_info is not None for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
 async def test_latency_fault_introduces_delay(tmp_path: Path) -> None:
     fault = HttpLatencyFault.model_validate(
         {
@@ -400,7 +494,13 @@ async def test_latency_retry_preserves_inferred_timeout_event_order(tmp_path: Pa
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "fault_type",
-    ["http_latency", "http_error", "http_rate_limit", "http_malformed_json"],
+    [
+        "http_latency",
+        "http_error",
+        "http_rate_limit",
+        "http_malformed_json",
+        "http_disconnect",
+    ],
 )
 async def test_fault_injection_fires_once_under_concurrency(
     tmp_path: Path, fault_type: str
@@ -417,20 +517,36 @@ async def test_fault_injection_fires_once_under_concurrency(
         fault = HttpErrorFault.model_validate({**fault_data, "status_code": 503})
     elif fault_type == "http_rate_limit":
         fault = HttpRateLimitFault.model_validate({**fault_data, "retry_after_seconds": 1})
-    else:
+    elif fault_type == "http_malformed_json":
         fault = HttpMalformedJsonFault.model_validate(fault_data)
+    else:
+        fault = HttpDisconnectFault.model_validate(fault_data)
 
+    UPSTREAM_PATHS.clear()
     async with running_proxy(tmp_path, fault) as (proxy, recorder):
         assert proxy.proxy_url is not None
         async with httpx.AsyncClient(base_url=proxy.proxy_url, trust_env=False) as client:
-            responses = await asyncio.gather(*(client.get("/concurrent") for _ in range(20)))
+            results = await asyncio.gather(
+                *(client.get("/concurrent") for _ in range(20)),
+                return_exceptions=True,
+            )
 
+    responses = [result for result in results if isinstance(result, httpx.Response)]
+    errors = [result for result in results if isinstance(result, BaseException)]
     injected = [event for event in recorder.events if event.event_type == EventType.FAULT_INJECTED]
     assert len(injected) == 1
     assert injected[0].payload.fault_type == fault_type
     assert proxy.trigger is not None
     assert proxy.trigger.count == 20
     assert proxy.trigger.fired is True
+    if fault_type == "http_disconnect":
+        assert len(responses) == 19
+        assert len(errors) == 1
+        assert isinstance(errors[0], httpx.TransportError)
+        assert all(response.status_code == 200 for response in responses)
+        assert UPSTREAM_PATHS == ["/concurrent"] * 19
+    else:
+        assert errors == []
     if fault_type == "http_error":
         assert sum(response.status_code == 503 for response in responses) == 1
     elif fault_type == "http_rate_limit":

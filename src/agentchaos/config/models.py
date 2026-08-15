@@ -112,8 +112,18 @@ class HttpMalformedJsonFault(StrictModel):
     trigger: OccurrenceTriggerConfig
 
 
+class HttpDisconnectFault(StrictModel):
+    type: Literal["http_disconnect"]
+    target: FaultTarget
+    trigger: OccurrenceTriggerConfig
+
+
 FaultConfig = Annotated[
-    HttpLatencyFault | HttpErrorFault | HttpRateLimitFault | HttpMalformedJsonFault,
+    HttpLatencyFault
+    | HttpErrorFault
+    | HttpRateLimitFault
+    | HttpMalformedJsonFault
+    | HttpDisconnectFault,
     Field(discriminator="type"),
 ]
 

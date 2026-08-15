@@ -63,3 +63,18 @@ def test_fault_event_accepts_http_malformed_json_without_response_data() -> None
         "fault_type": "http_malformed_json",
         "parameters": {},
     }
+
+
+def test_fault_event_accepts_http_disconnect_without_response_data() -> None:
+    payload = FaultInjectedPayload(
+        operation_id="operation-1",
+        fault_type="http_disconnect",
+        parameters={},
+    )
+
+    assert payload.model_dump(mode="json") == {
+        "kind": "FAULT_INJECTED",
+        "operation_id": "operation-1",
+        "fault_type": "http_disconnect",
+        "parameters": {},
+    }

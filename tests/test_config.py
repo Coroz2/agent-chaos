@@ -34,6 +34,10 @@ MALFORMED_JSON_SCENARIO = VALID_SCENARIO.replace(
     "type: http_error", "type: http_malformed_json"
 ).replace("  status_code: 503\n", "")
 
+DISCONNECT_SCENARIO = VALID_SCENARIO.replace("type: http_error", "type: http_disconnect").replace(
+    "  status_code: 503\n", ""
+)
+
 
 def write_scenario(tmp_path: Path, content: str) -> Path:
     path = tmp_path / "scenario.yaml"
@@ -122,6 +126,40 @@ def test_http_malformed_json_rejects_fault_specific_fields(
 
 def test_legacy_malformed_json_discriminator_is_rejected(tmp_path: Path) -> None:
     invalid = MALFORMED_JSON_SCENARIO.replace("http_malformed_json", "malformed_json")
+
+    with pytest.raises(ScenarioLoadError, match="union_tag_invalid"):
+        load_scenario(write_scenario(tmp_path, invalid))
+
+
+def test_http_disconnect_scenario_accepts_only_common_fault_fields(tmp_path: Path) -> None:
+    scenario = load_scenario(write_scenario(tmp_path, DISCONNECT_SCENARIO))
+
+    assert scenario.fault is not None
+    assert scenario.fault.type == "http_disconnect"
+
+
+@pytest.mark.parametrize(
+    "extra_field",
+    [
+        "latency_ms: 50",
+        "status_code: 503",
+        "retry_after_seconds: 1",
+        "body: configurable",
+        "headers: {X-Test: configurable}",
+    ],
+)
+def test_http_disconnect_rejects_fault_specific_fields(tmp_path: Path, extra_field: str) -> None:
+    invalid = DISCONNECT_SCENARIO.replace(
+        "    occurrence: 2", f"    occurrence: 2\n  {extra_field}"
+    )
+
+    with pytest.raises(ScenarioLoadError, match="extra_forbidden"):
+        load_scenario(write_scenario(tmp_path, invalid))
+
+
+@pytest.mark.parametrize("alias", ["disconnect", "http_disconnection"])
+def test_http_disconnect_aliases_are_rejected(tmp_path: Path, alias: str) -> None:
+    invalid = DISCONNECT_SCENARIO.replace("http_disconnect", alias)
 
     with pytest.raises(ScenarioLoadError, match="union_tag_invalid"):
         load_scenario(write_scenario(tmp_path, invalid))

@@ -8,7 +8,13 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Literal, Protocol
 
-HttpFaultType = Literal["http_latency", "http_error", "http_rate_limit", "http_malformed_json"]
+HttpFaultType = Literal[
+    "http_latency",
+    "http_error",
+    "http_rate_limit",
+    "http_malformed_json",
+    "http_disconnect",
+]
 
 
 class HttpFaultAction(StrEnum):
@@ -17,6 +23,7 @@ class HttpFaultAction(StrEnum):
     FORWARD = "forward"
     RESPOND = "respond"
     ABANDON = "abandon"
+    DISCONNECT = "disconnect"
 
 
 @dataclass(frozen=True, slots=True)
