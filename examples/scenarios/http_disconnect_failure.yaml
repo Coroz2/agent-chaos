@@ -1,0 +1,32 @@
+schema_version: 1
+name: http-disconnect-no-recovery
+
+dependency:
+  type: http
+  base_url: http://127.0.0.1:19108
+  start:
+    command: [python, fake_api.py, --port, "19108"]
+    cwd: ..
+    readiness:
+      path: /health
+
+workload:
+  name: non-resilient-demo-agent
+  command: [python, demo_agent.py]
+  cwd: ..
+  env:
+    DEMO_MAX_ATTEMPTS: "1"
+  proxy_url_env: CUSTOMER_API_URL
+
+fault:
+  type: http_disconnect
+  target:
+    method: GET
+    path: /customer/*
+  trigger:
+    occurrence: 2
+
+success:
+  exit_code: 1
+
+timeout_seconds: 10

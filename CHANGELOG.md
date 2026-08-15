@@ -7,6 +7,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Deterministic `http_disconnect` injection with structured recovery evidence and managed offline
+  recovery and no-recovery examples.
+
 ## [0.2.0] - 2026-08-13
 
 ### Added
