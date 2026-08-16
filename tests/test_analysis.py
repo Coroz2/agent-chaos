@@ -700,3 +700,33 @@ def test_over_injection_is_an_internal_error() -> None:
     assert result.result == ExperimentResult.FAILED
     assert result.reason_code == "INTERNAL_ERROR"
     assert result.completed_occurrences == (2, 4)
+
+
+def test_duplicate_injection_operation_is_an_internal_error() -> None:
+    result = analyze_schedule(
+        (2, 4),
+        [
+            FaultInjectedPayload(
+                operation_id="duplicate-operation",
+                fault_type="http_latency",
+                parameters={"latency_ms": 10},
+            ),
+            FaultInjectedPayload(
+                operation_id="duplicate-operation",
+                fault_type="http_latency",
+                parameters={"latency_ms": 10},
+            ),
+            WorkloadCompletedPayload(
+                exit_code=0,
+                timed_out=False,
+                interrupted=False,
+                duration_ms=1,
+            ),
+        ],
+    )
+
+    assert result.result == ExperimentResult.FAILED
+    assert result.reason_code == "INTERNAL_ERROR"
+    assert result.diagnostics == (
+        "duplicate fault injection evidence was recorded for one operation",
+    )

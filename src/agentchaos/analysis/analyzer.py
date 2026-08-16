@@ -121,6 +121,8 @@ def analyze(scenario: Scenario, events: tuple[Event, ...]) -> AnalysisResult:
     recovery_evidence = _build_recovery_evidence(fault_failures, retries, successes)
     recoveries_required = len(recovery_evidence)
     recoveries_successful = sum(row.retry_operation_id is not None for row in recovery_evidence)
+    injected_operation_ids = [payload.operation_id for _, payload in injected]
+    duplicate_injection = len(injected_operation_ids) != len(set(injected_operation_ids))
 
     if run_error is not None:
         reason_code = run_error.reason_code
@@ -146,6 +148,9 @@ def analyze(scenario: Scenario, events: tuple[Event, ...]) -> AnalysisResult:
     elif not injected:
         reason_code = "FAULT_NOT_TRIGGERED"
         diagnostics.append("the configured fault occurrence was never reached")
+    elif duplicate_injection:
+        reason_code = "INTERNAL_ERROR"
+        diagnostics.append("duplicate fault injection evidence was recorded for one operation")
     elif len(injected) > len(scheduled_occurrences):
         reason_code = "INTERNAL_ERROR"
         diagnostics.append(

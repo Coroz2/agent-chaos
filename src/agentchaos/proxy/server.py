@@ -89,6 +89,7 @@ class ChaosProxy:
         self._selection_lock = asyncio.Lock()
         self._state_lock = asyncio.Lock()
         self._fault_operations: dict[str, deque[FaultOperationState]] = {}
+        self._active_latency_operations: dict[str, deque[FaultOperationState]] = {}
         self._server: uvicorn.Server | None = None
         self._server_task: asyncio.Task[None] | None = None
         self._socket: socket.socket | None = None
@@ -245,12 +246,13 @@ class ChaosProxy:
     ) -> FaultOperationState | None:
         async with self._state_lock:
             queue = self._fault_operations.get(fingerprint)
-            if not queue:
-                return None
-            state = queue[0]
-            if state.status == "pending":
-                if state.fault_type != "http_latency":
+            if queue:
+                state = queue[0]
+            else:
+                active = self._active_latency_operations.get(fingerprint)
+                if not active:
                     return None
+                state = active[0]
                 await self._emit_failure_locked(
                     state,
                     failure_kind="client_timeout_inferred",
@@ -276,7 +278,9 @@ class ChaosProxy:
         assert executor is not None
         state = FaultOperationState(operation_id, fingerprint, executor.fault_type)
         async with self._state_lock:
-            self._fault_operations.setdefault(fingerprint, deque()).append(state)
+            if executor.fault_type == "http_latency":
+                state.status = "delaying"
+                self._active_latency_operations.setdefault(fingerprint, deque()).append(state)
             await self.recorder.emit(
                 "proxy",
                 FaultInjectedPayload(
@@ -300,13 +304,14 @@ class ChaosProxy:
         async with self._state_lock:
             if fault_state is not None:
                 fault_state.status = "succeeded"
-                self._remove_fault_operation_locked(fault_state)
+                self._remove_active_latency_locked(fault_state)
+                self._remove_unresolved_failure_locked(fault_state)
             await self.recorder.emit("proxy", payload)
             if retry_state is not None:
                 retry_state.status = "succeeded"
-                self._remove_fault_operation_locked(retry_state)
+                self._remove_unresolved_failure_locked(retry_state)
 
-    def _remove_fault_operation_locked(self, state: FaultOperationState) -> None:
+    def _remove_unresolved_failure_locked(self, state: FaultOperationState) -> None:
         queue = self._fault_operations.get(state.fingerprint)
         if queue is None:
             return
@@ -316,6 +321,25 @@ class ChaosProxy:
             return
         if not queue:
             del self._fault_operations[state.fingerprint]
+
+    def _remove_active_latency_locked(self, state: FaultOperationState) -> None:
+        queue = self._active_latency_operations.get(state.fingerprint)
+        if queue is None:
+            return
+        try:
+            queue.remove(state)
+        except ValueError:
+            return
+        if not queue:
+            del self._active_latency_operations[state.fingerprint]
+
+    async def _begin_forwarding(self, state: FaultOperationState) -> bool:
+        async with self._state_lock:
+            if state.status != "delaying" or state.failure_emitted:
+                return False
+            state.status = "forwarding"
+            self._remove_active_latency_locked(state)
+            return True
 
     async def _execute_fault(
         self,
@@ -327,6 +351,7 @@ class ChaosProxy:
             HttpFaultExecutionContext(
                 retry_seen=state.retry_seen,
                 is_disconnected=request.is_disconnected,
+                begin_forwarding=lambda: self._begin_forwarding(state),
             )
         )
         if outcome.action == HttpFaultAction.FORWARD:
@@ -435,6 +460,7 @@ class ChaosProxy:
             return
         state.status = "failed"
         state.failure_emitted = True
+        self._remove_active_latency_locked(state)
         await self._emit_plain_failure(
             state.operation_id,
             state.fingerprint,
@@ -442,6 +468,7 @@ class ChaosProxy:
             status_code,
             True,
         )
+        self._fault_operations.setdefault(state.fingerprint, deque()).append(state)
 
     async def _emit_plain_failure(
         self,

@@ -22,7 +22,11 @@ from agentchaos.config.models import (
     HttpRateLimitFault,
     Scenario,
 )
-from agentchaos.events.models import EventType, WorkloadCompletedPayload
+from agentchaos.events.models import (
+    EventType,
+    OperationSucceededPayload,
+    WorkloadCompletedPayload,
+)
 from agentchaos.events.recorder import EventRecorder
 from agentchaos.proxy import server as proxy_module
 from agentchaos.proxy.protocol import AgentChaosH11Protocol
@@ -62,9 +66,16 @@ async def large_response(request: Request) -> JSONResponse:
     return JSONResponse({"value": "12345"})
 
 
+async def slow_response(request: Request) -> JSONResponse:
+    UPSTREAM_PATHS.append(request.url.path)
+    await asyncio.sleep(0.1)
+    return JSONResponse({"path": request.url.path})
+
+
 UPSTREAM = Starlette(
     routes=[
         Route("/large", large_response),
+        Route("/slow", slow_response),
         Route("/{path:path}", echo, methods=["GET", "POST"]),
     ]
 )
@@ -621,6 +632,94 @@ async def test_latency_retry_preserves_inferred_timeout_event_order(tmp_path: Pa
         "fingerprint": inferred_failure.fingerprint,
         "attempt": 2,
     }
+
+
+@pytest.mark.asyncio
+async def test_latency_forwarding_cannot_be_reclassified_as_a_failure(tmp_path: Path) -> None:
+    fault = HttpLatencyFault.model_validate(
+        {
+            "type": "http_latency",
+            "target": {"path": "/slow"},
+            "trigger": {"occurrence": 1},
+            "latency_ms": 10,
+        }
+    )
+    UPSTREAM_PATHS.clear()
+
+    async with running_proxy(tmp_path, fault) as (proxy, recorder):
+        assert proxy.proxy_url is not None
+        async with httpx.AsyncClient(base_url=proxy.proxy_url, trust_env=False) as client:
+            first_task = asyncio.create_task(client.get("/slow"))
+            for _ in range(100):
+                if UPSTREAM_PATHS:
+                    break
+                await asyncio.sleep(0.002)
+            assert UPSTREAM_PATHS == ["/slow"]
+            second = await client.get("/slow")
+            first = await first_task
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert UPSTREAM_PATHS == ["/slow", "/slow"]
+    failures = {
+        event.payload.operation_id
+        for event in recorder.events
+        if event.event_type == EventType.OPERATION_FAILED
+    }
+    successes = {
+        event.payload.operation_id
+        for event in recorder.events
+        if event.event_type == EventType.OPERATION_SUCCEEDED
+    }
+    assert failures == set()
+    assert len(successes) == 2
+    assert not any(event.event_type == EventType.RETRY_OBSERVED for event in recorder.events)
+
+
+@pytest.mark.asyncio
+async def test_recovery_fifo_follows_failure_event_order(tmp_path: Path) -> None:
+    fault = HttpLatencyFault.model_validate(
+        {
+            "type": "http_latency",
+            "target": {"path": "/customer/*"},
+            "trigger": {"occurrences": [1, 2]},
+            "latency_ms": 10,
+        }
+    )
+    recorder = EventRecorder(tmp_path / "events.jsonl", "run")
+    proxy = ChaosProxy("http://upstream", fault, recorder)
+    try:
+        first = await proxy._register_fault_operation("injected-first", "fingerprint")
+        second = await proxy._register_fault_operation("injected-second", "fingerprint")
+        await proxy._emit_failure(second, "client_timeout_inferred", None)
+        await proxy._emit_failure(first, "client_timeout_inferred", None)
+
+        first_retry = await proxy._register_retry("retry-one", "fingerprint")
+        assert first_retry is second
+        await proxy._emit_success(
+            OperationSucceededPayload(
+                operation_id="retry-one",
+                fingerprint="fingerprint",
+                status_code=200,
+                duration_ms=1,
+                fault_related=True,
+            ),
+            fault_state=None,
+            retry_state=first_retry,
+        )
+        second_retry = await proxy._register_retry("retry-two", "fingerprint")
+        assert second_retry is first
+    finally:
+        await proxy._client.aclose()
+        recorder.close()
+
+    retries = [
+        event.payload for event in recorder.events if event.event_type == EventType.RETRY_OBSERVED
+    ]
+    assert [payload.retry_of_operation_id for payload in retries] == [
+        "injected-second",
+        "injected-first",
+    ]
 
 
 @pytest.mark.asyncio

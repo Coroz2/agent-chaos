@@ -119,6 +119,27 @@ def test_schema_two_baseline_rejects_recovery_evidence() -> None:
         validate_json_payload(payload)
 
 
+def test_schema_two_baseline_rejects_over_injection_exception() -> None:
+    payload = schema_two_report().model_dump(mode="json")
+    payload |= {
+        "result": "FAILED",
+        "reason_code": "INTERNAL_ERROR",
+        "faults_injected": 1,
+        "fault": {
+            "configured": False,
+            "type": None,
+            "injected": False,
+            "scheduled_occurrences": [],
+            "completed_occurrences": [],
+            "schedule_completed": True,
+        },
+        "recovery": {"required": 0, "successful": 0, "evidence": []},
+    }
+
+    with pytest.raises(ValidationError):
+        validate_json_payload(payload)
+
+
 @pytest.mark.parametrize(
     "change",
     [

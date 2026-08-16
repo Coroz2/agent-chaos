@@ -149,7 +149,8 @@ class Report(ReportModel):
             raise ValueError("schema-2 reports require schema-2 fault and recovery objects")
         elif self.faults_injected != len(self.fault.completed_occurrences):
             over_injection = (
-                self.result == ExperimentResult.FAILED
+                self.fault.configured
+                and self.result == ExperimentResult.FAILED
                 and self.reason_code == "INTERNAL_ERROR"
                 and self.faults_injected > len(self.fault.completed_occurrences)
                 and self.fault.schedule_completed
