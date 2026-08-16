@@ -165,7 +165,77 @@ class Report(ReportModel):
             and self.recovery.required != 0
         ):
             raise ValueError("baseline reports cannot contain recovery evidence")
+        if self.schema_version == 2 and isinstance(self.recovery, RecoveryReportV2):
+            counts = (
+                self.duration_ms,
+                self.faults_injected,
+                self.operations_observed,
+                self.successful_operations,
+                self.failed_operations,
+                self.retries_observed,
+            )
+            if any(value < 0 for value in counts):
+                raise ValueError("schema-2 report metrics must be non-negative")
+            if self.successful_operations + self.failed_operations > self.operations_observed:
+                raise ValueError("terminal operations cannot exceed observed operations")
+            if self.faults_injected > self.operations_observed:
+                raise ValueError("fault injections cannot exceed observed operations")
+            if self.retries_observed > self.operations_observed:
+                raise ValueError("retries cannot exceed observed operations")
+            if self.recovery.required > self.failed_operations:
+                raise ValueError("required recoveries cannot exceed failed operations")
+            if self.recovery.required > self.faults_injected:
+                raise ValueError("required recoveries cannot exceed fault injections")
+            if self.recovery.successful > self.retries_observed:
+                raise ValueError("successful recoveries cannot exceed observed retries")
+            if self.recovery.successful > self.successful_operations:
+                raise ValueError("successful recoveries cannot exceed successful operations")
+            self._validate_schema_two_outcome()
         return self
+
+    def _validate_schema_two_outcome(self) -> None:
+        assert isinstance(self.fault, FaultReportV2)
+        assert isinstance(self.recovery, RecoveryReportV2)
+        if self.workload_exit_code != self.workload.exit_code:
+            raise ValueError("top-level and workload exit codes must agree")
+        if self.workload.interrupted and self.workload.timed_out:
+            raise ValueError("workload cannot be both interrupted and timed out")
+
+        run_error_reasons = {
+            "DEPENDENCY_START_FAILED",
+            "PROXY_START_FAILED",
+            "WORKLOAD_SPAWN_FAILED",
+            "INTERNAL_ERROR",
+        }
+        if self.reason_code in run_error_reasons:
+            if self.result != ExperimentResult.FAILED:
+                raise ValueError("failure reason codes require a FAILED result")
+            return
+
+        expected: tuple[ExperimentResult, str]
+        if self.workload.interrupted:
+            expected = (ExperimentResult.FAILED, "INTERRUPTED")
+        elif self.workload.timed_out:
+            expected = (ExperimentResult.FAILED, "WORKLOAD_TIMED_OUT")
+        elif self.workload.exit_code is None:
+            expected = (ExperimentResult.FAILED, "WORKLOAD_NOT_COMPLETED")
+        elif self.workload.exit_code != self.workload.expected_exit_code:
+            expected = (ExperimentResult.FAILED, "WORKLOAD_EXIT_CODE_MISMATCH")
+        elif not self.fault.configured:
+            expected = (ExperimentResult.PASSED, "BASELINE_SUCCEEDED")
+        elif self.faults_injected == 0:
+            expected = (ExperimentResult.FAILED, "FAULT_NOT_TRIGGERED")
+        elif not self.fault.schedule_completed:
+            expected = (ExperimentResult.FAILED, "FAULT_SCHEDULE_INCOMPLETE")
+        elif self.recovery.required == 0:
+            expected = (ExperimentResult.PASSED, "FAULT_TOLERATED")
+        elif self.recovery.successful == self.recovery.required:
+            expected = (ExperimentResult.RECOVERED, "RECOVERY_OBSERVED")
+        else:
+            expected = (ExperimentResult.FAILED, "RECOVERY_NOT_OBSERVED")
+
+        if (self.result, self.reason_code) != expected:
+            raise ValueError("result and reason code contradict schema-2 evidence")
 
 
 type ReportDocument = Report

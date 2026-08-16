@@ -1,3 +1,4 @@
+import sys
 from pathlib import Path
 
 import pytest
@@ -6,9 +7,48 @@ from typer.testing import CliRunner
 from agentchaos.analysis.analyzer import ExperimentResult
 from agentchaos.cli import app
 from agentchaos.config.loader import load_scenario
+from agentchaos.config.models import Scenario
 from agentchaos.runtime.orchestrator import run_experiment
 
 runner = CliRunner()
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_events_sanitize_dependency_url_secrets(tmp_path: Path) -> None:
+    scenario_path = tmp_path / "scenario.yaml"
+    scenario_path.write_text("user-authored scenario\n", encoding="utf-8")
+    scenario = Scenario.model_validate(
+        {
+            "schema_version": 1,
+            "name": "safe lifecycle evidence",
+            "dependency": {
+                "type": "http",
+                "base_url": (
+                    "http://alice:super-secret@127.0.0.1:9000/root?token=raw-query-secret"
+                ),
+            },
+            "workload": {"command": [sys.executable, "-c", "raise SystemExit(0)"]},
+            "success": {"exit_code": 0},
+        }
+    )
+
+    execution = await run_experiment(
+        scenario,
+        scenario_path,
+        tmp_path / "runs",
+        stream_output=False,
+    )
+
+    generated = "\n".join(
+        [
+            (execution.run_dir / "events.jsonl").read_text(encoding="utf-8"),
+            (execution.run_dir / "report.json").read_text(encoding="utf-8"),
+        ]
+    )
+    assert execution.report.result == ExperimentResult.PASSED
+    assert "http://127.0.0.1:9000/root" in generated
+    for secret in ("alice", "super-secret", "raw-query-secret"):
+        assert secret not in generated
 
 
 @pytest.mark.asyncio

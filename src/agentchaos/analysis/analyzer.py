@@ -83,8 +83,11 @@ class AnalysisResult:
 
 def analyze(scenario: Scenario, events: tuple[Event, ...]) -> AnalysisResult:
     """Derive metrics and the outcome exclusively from structured events."""
+    ordered_events = tuple(sorted(events, key=lambda event: event.sequence))
+    event_sequences = [event.sequence for event in ordered_events]
+    duplicate_event_sequence = len(event_sequences) != len(set(event_sequences))
     by_type: dict[EventType, list[Event]] = {event_type: [] for event_type in EventType}
-    for event in events:
+    for event in ordered_events:
         by_type[event.event_type].append(event)
 
     workload_payload = _last_payload(
@@ -142,6 +145,9 @@ def analyze(scenario: Scenario, events: tuple[Event, ...]) -> AnalysisResult:
             f"expected workload exit code {scenario.success.exit_code}, "
             f"got {workload_payload.exit_code}"
         )
+    elif duplicate_event_sequence:
+        reason_code = "INTERNAL_ERROR"
+        diagnostics.append("duplicate event sequence numbers were recorded")
     elif scenario.fault is None:
         result = ExperimentResult.PASSED
         reason_code = "BASELINE_SUCCEEDED"
@@ -177,7 +183,7 @@ def analyze(scenario: Scenario, events: tuple[Event, ...]) -> AnalysisResult:
             result = ExperimentResult.RECOVERED
             reason_code = "RECOVERY_OBSERVED"
 
-    duration_ms = events[-1].elapsed_ms if events else 0
+    duration_ms = ordered_events[-1].elapsed_ms if ordered_events else 0
     return AnalysisResult(
         result=result,
         reason_code=reason_code,
@@ -208,9 +214,9 @@ def _build_recovery_evidence(
     retries: list[tuple[Event, RetryObservedPayload]],
     successes: list[tuple[Event, OperationSucceededPayload]],
 ) -> tuple[RecoveryEvidence, ...]:
-    successes_by_operation: dict[str, list[Event]] = {}
+    successes_by_operation: dict[str, list[tuple[Event, OperationSucceededPayload]]] = {}
     for event, payload in successes:
-        successes_by_operation.setdefault(payload.operation_id, []).append(event)
+        successes_by_operation.setdefault(payload.operation_id, []).append((event, payload))
 
     used_successful_operations: set[str] = set()
     evidence: list[RecoveryEvidence] = []
@@ -221,19 +227,25 @@ def _build_recovery_evidence(
             if (
                 retry_payload.retry_of_operation_id != failure_payload.operation_id
                 or retry_event.sequence <= failure_event.sequence
+                or retry_payload.fingerprint != failure_payload.fingerprint
                 or retry_payload.operation_id in used_successful_operations
             ):
                 continue
-            success_event = next(
+            successful = next(
                 (
-                    candidate
-                    for candidate in successes_by_operation.get(retry_payload.operation_id, [])
-                    if candidate.sequence > retry_event.sequence
+                    (candidate_event, candidate_payload)
+                    for candidate_event, candidate_payload in successes_by_operation.get(
+                        retry_payload.operation_id, []
+                    )
+                    if candidate_event.sequence > retry_event.sequence
+                    and candidate_payload.fingerprint == failure_payload.fingerprint
+                    and candidate_payload.status_code < 400
                 ),
                 None,
             )
-            if success_event is None:
+            if successful is None:
                 continue
+            success_event, _ = successful
             retry_operation_id = retry_payload.operation_id
             recovery_latency_ms = max(0, success_event.elapsed_ms - failure_event.elapsed_ms)
             used_successful_operations.add(retry_payload.operation_id)

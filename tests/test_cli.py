@@ -40,6 +40,22 @@ def test_validate_reports_configuration_errors(tmp_path: Path) -> None:
     assert "Invalid scenario" in result.output
 
 
+@pytest.mark.parametrize("command", ["validate", "run"])
+@pytest.mark.parametrize("malformed", [b"\xff\xfe", b"schema_version: " + b"9" * 5_000])
+def test_scenario_commands_safely_reject_decode_and_scalar_failures(
+    tmp_path: Path, command: str, malformed: bytes
+) -> None:
+    scenario = tmp_path / "invalid.yaml"
+    scenario.write_bytes(malformed)
+
+    result = runner.invoke(app, [command, str(scenario)])
+
+    assert result.exit_code == 2
+    assert "Invalid scenario" in result.stderr
+    assert "9999999999" not in result.output
+    assert "\\xff" not in result.output
+
+
 def test_validate_accepts_example() -> None:
     result = runner.invoke(app, ["validate", "examples/scenarios/api_503_recovery.yaml"])
 
@@ -245,6 +261,21 @@ def test_inspect_accepts_schema_two_report(tmp_path: Path, use_directory: bool) 
 
     assert result.exit_code == 0
     assert result.output == render_summary(report, report_path.resolve())
+
+
+def test_inspect_rejects_schema_two_outcome_that_contradicts_schedule(tmp_path: Path) -> None:
+    payload = _report_v2().model_dump(mode="json")
+    payload["fault"] |= {
+        "scheduled_occurrences": [2, 4, 6],
+        "schedule_completed": False,
+    }
+    report_path = tmp_path / "report.json"
+    report_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = runner.invoke(app, ["inspect", str(report_path)])
+
+    assert result.exit_code == 2
+    assert result.stderr == "Cannot inspect report: Report schema is invalid.\n"
 
 
 def test_schema_two_summary_renderer_exact_output(tmp_path: Path) -> None:

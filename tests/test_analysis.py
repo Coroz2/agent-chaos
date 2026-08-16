@@ -730,3 +730,129 @@ def test_duplicate_injection_operation_is_an_internal_error() -> None:
     assert result.diagnostics == (
         "duplicate fault injection evidence was recorded for one operation",
     )
+
+
+@pytest.mark.parametrize(
+    ("retry_fingerprint", "success_fingerprint", "success_status"),
+    [
+        ("different", "fingerprint", 200),
+        ("fingerprint", "different", 200),
+        ("fingerprint", "fingerprint", 500),
+    ],
+)
+def test_recovery_requires_matching_fingerprints_and_success_status(
+    retry_fingerprint: str,
+    success_fingerprint: str,
+    success_status: int,
+) -> None:
+    result = analyze_schedule(
+        (1,),
+        [
+            FaultInjectedPayload(
+                operation_id="failed",
+                fault_type="http_error",
+                parameters={"status_code": 503},
+            ),
+            OperationFailedPayload(
+                operation_id="failed",
+                fingerprint="fingerprint",
+                failure_kind="injected_http_error",
+                status_code=503,
+                fault_related=True,
+            ),
+            RetryObservedPayload(
+                operation_id="retry",
+                retry_of_operation_id="failed",
+                fingerprint=retry_fingerprint,
+                attempt=2,
+            ),
+            OperationSucceededPayload(
+                operation_id="retry",
+                fingerprint=success_fingerprint,
+                status_code=success_status,
+                duration_ms=1,
+                fault_related=True,
+            ),
+            WorkloadCompletedPayload(
+                exit_code=0,
+                timed_out=False,
+                interrupted=False,
+                duration_ms=1,
+            ),
+        ],
+    )
+
+    assert result.result == ExperimentResult.FAILED
+    assert result.reason_code == "RECOVERY_NOT_OBSERVED"
+    assert result.recoveries_successful == 0
+
+
+def test_analysis_uses_recorder_sequence_not_input_tuple_order() -> None:
+    ordered = events(
+        [
+            FaultInjectedPayload(
+                operation_id="failed-one",
+                fault_type="http_error",
+                parameters={"status_code": 503},
+            ),
+            OperationFailedPayload(
+                operation_id="failed-one",
+                fingerprint="one",
+                failure_kind="injected_http_error",
+                status_code=503,
+                fault_related=True,
+            ),
+            FaultInjectedPayload(
+                operation_id="failed-two",
+                fault_type="http_error",
+                parameters={"status_code": 503},
+            ),
+            OperationFailedPayload(
+                operation_id="failed-two",
+                fingerprint="two",
+                failure_kind="injected_http_error",
+                status_code=503,
+                fault_related=True,
+            ),
+            WorkloadCompletedPayload(
+                exit_code=0,
+                timed_out=False,
+                interrupted=False,
+                duration_ms=1,
+            ),
+        ]
+    )
+
+    with patch("agentchaos.analysis.analyzer._configured_schedule", return_value=(2, 4)):
+        result = analyze(scenario(), tuple(reversed(ordered)))
+
+    assert [row.failed_operation_id for row in result.recovery_evidence] == [
+        "failed-one",
+        "failed-two",
+    ]
+    assert result.duration_ms == ordered[-1].elapsed_ms
+
+
+def test_duplicate_event_sequence_is_an_internal_error() -> None:
+    recorded = events(
+        [
+            FaultInjectedPayload(
+                operation_id="operation",
+                fault_type="http_error",
+                parameters={"status_code": 503},
+            ),
+            WorkloadCompletedPayload(
+                exit_code=0,
+                timed_out=False,
+                interrupted=False,
+                duration_ms=1,
+            ),
+        ]
+    )
+    duplicated = (recorded[0], recorded[1].model_copy(update={"sequence": 1}))
+
+    result = analyze(scenario(), duplicated)
+
+    assert result.result == ExperimentResult.FAILED
+    assert result.reason_code == "INTERNAL_ERROR"
+    assert result.diagnostics == ("duplicate event sequence numbers were recorded",)

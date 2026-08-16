@@ -9,6 +9,7 @@ from agentchaos.events.models import (
     RunStartedPayload,
 )
 from agentchaos.events.recorder import EventRecorder
+from agentchaos.runtime.orchestrator import _safe_url_for_evidence
 
 
 @pytest.mark.asyncio
@@ -78,3 +79,24 @@ def test_fault_event_accepts_http_disconnect_without_response_data() -> None:
         "fault_type": "http_disconnect",
         "parameters": {},
     }
+
+
+@pytest.mark.parametrize(
+    ("configured", "safe"),
+    [
+        (
+            "http://alice:super-secret@127.0.0.1:9000/root?token=raw-query-secret#fragment",
+            "http://127.0.0.1:9000/root",
+        ),
+        (
+            "http://user:password@[::1]:9000/root?credential=value",
+            "http://[::1]:9000/root",
+        ),
+    ],
+)
+def test_lifecycle_event_urls_exclude_credentials_and_queries(configured: str, safe: str) -> None:
+    captured = _safe_url_for_evidence(configured)
+
+    assert captured == safe
+    for secret in ("alice", "super-secret", "raw-query-secret", "user", "password", "value"):
+        assert secret not in captured

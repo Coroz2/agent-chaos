@@ -7,6 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
 from agentchaos.analysis.analyzer import AnalysisResult, ExperimentResult, analyze
@@ -74,6 +75,7 @@ async def run_experiment(
 
     async with EventRecorder(events_path, run_id, listener=event_listener) as recorder:
         await recorder.emit("orchestrator", RunStartedPayload(scenario_name=scenario.name))
+        dependency_evidence_url = _safe_url_for_evidence(str(scenario.dependency.base_url))
         try:
             if scenario.dependency.start is not None:
                 start = scenario.dependency.start
@@ -95,7 +97,7 @@ async def run_experiment(
                     await recorder.emit(
                         "dependency",
                         DependencyStartedPayload(
-                            base_url=str(scenario.dependency.base_url),
+                            base_url=dependency_evidence_url,
                             pid=dependency_process.pid,
                         ),
                     )
@@ -109,7 +111,7 @@ async def run_experiment(
                     await recorder.emit(
                         "dependency",
                         DependencyReadyPayload(
-                            base_url=str(scenario.dependency.base_url),
+                            base_url=dependency_evidence_url,
                             readiness_path=readiness.path,
                         ),
                     )
@@ -138,7 +140,7 @@ async def run_experiment(
                 "injector",
                 InjectorStartedPayload(
                     proxy_url=proxy_url,
-                    upstream_url=str(scenario.dependency.base_url),
+                    upstream_url=dependency_evidence_url,
                 ),
             )
 
@@ -231,6 +233,18 @@ async def run_experiment(
 
 class _RunAborted(Exception):
     pass
+
+
+def _safe_url_for_evidence(url: str) -> str:
+    """Remove credentials, query values, and fragments from a lifecycle URL."""
+    parsed = urlsplit(url)
+    hostname = parsed.hostname or ""
+    if ":" in hostname and not hostname.startswith("["):
+        hostname = f"[{hostname}]"
+    netloc = hostname
+    if parsed.port is not None:
+        netloc = f"{netloc}:{parsed.port}"
+    return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
 
 
 def _build_report(

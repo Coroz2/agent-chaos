@@ -272,3 +272,23 @@ def test_invalid_fault_union_fails(tmp_path: Path) -> None:
 def test_non_mapping_yaml_fails(tmp_path: Path) -> None:
     with pytest.raises(ScenarioLoadError, match="YAML mapping"):
         load_scenario(write_scenario(tmp_path, "- not\n- a\n- mapping\n"))
+
+
+def test_non_utf8_scenario_is_a_safe_load_error(tmp_path: Path) -> None:
+    path = tmp_path / "scenario.yaml"
+    path.write_bytes(b"\xff\xfe")
+
+    with pytest.raises(ScenarioLoadError, match="UTF-8") as raised:
+        load_scenario(path)
+
+    assert "\\xff" not in str(raised.value)
+
+
+def test_yaml_scalar_conversion_value_error_is_normalized(tmp_path: Path) -> None:
+    oversized_integer = "9" * 5_000
+    path = write_scenario(tmp_path, f"schema_version: {oversized_integer}\n")
+
+    with pytest.raises(ScenarioLoadError, match="invalid YAML value") as raised:
+        load_scenario(path)
+
+    assert oversized_integer not in str(raised.value)

@@ -143,6 +143,97 @@ def test_schema_two_baseline_rejects_over_injection_exception() -> None:
 @pytest.mark.parametrize(
     "change",
     [
+        {"failed_operations": 0},
+        {"retries_observed": 0},
+        {"successful_operations": 0},
+        {"operations_observed": -1},
+        {"operations_observed": 1},
+    ],
+)
+def test_schema_two_report_rejects_impossible_aggregate_counts(
+    change: dict[str, object],
+) -> None:
+    payload = schema_two_report().model_dump(mode="json") | change
+
+    with pytest.raises(ValidationError):
+        validate_json_payload(payload)
+
+
+def test_schema_two_recovery_count_cannot_exceed_fault_injections() -> None:
+    payload = schema_two_report().model_dump(mode="json")
+    payload |= {
+        "result": "FAILED",
+        "reason_code": "FAULT_NOT_TRIGGERED",
+        "faults_injected": 0,
+        "fault": {
+            "configured": True,
+            "type": "http_error",
+            "injected": False,
+            "scheduled_occurrences": [2],
+            "completed_occurrences": [],
+            "schedule_completed": False,
+        },
+    }
+
+    with pytest.raises(ValidationError):
+        validate_json_payload(payload)
+
+
+@pytest.mark.parametrize("case", ["incomplete", "partial", "zero-required"])
+def test_schema_two_report_rejects_outcome_that_contradicts_evidence(case: str) -> None:
+    payload = schema_two_report().model_dump(mode="json")
+    if case == "incomplete":
+        payload["fault"] |= {
+            "scheduled_occurrences": [1, 2],
+            "completed_occurrences": [1],
+            "schedule_completed": False,
+        }
+    elif case == "partial":
+        payload["recovery"] = {
+            "required": 1,
+            "successful": 0,
+            "evidence": [
+                {
+                    "failed_operation_id": "failed",
+                    "retry_operation_id": None,
+                    "recovery_latency_ms": None,
+                }
+            ],
+        }
+    else:
+        payload |= {"failed_operations": 0}
+        payload["recovery"] = {"required": 0, "successful": 0, "evidence": []}
+
+    with pytest.raises(ValidationError):
+        validate_json_payload(payload)
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["top-level-exit", "wrong-exit", "timed-out", "interrupted", "both-terminal-flags"],
+)
+def test_schema_two_report_rejects_outcome_that_contradicts_workload(case: str) -> None:
+    payload = schema_two_report().model_dump(mode="json")
+    if case == "top-level-exit":
+        payload["workload_exit_code"] = 1
+    elif case == "wrong-exit":
+        payload["workload_exit_code"] = 1
+        payload["workload"]["exit_code"] = 1
+    elif case == "timed-out":
+        payload["workload"]["timed_out"] = True
+    elif case == "interrupted":
+        payload["workload"]["interrupted"] = True
+    else:
+        payload["workload"]["timed_out"] = True
+        payload["workload"]["interrupted"] = True
+
+    with pytest.raises(ValidationError):
+        validate_json_payload(payload)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
         {"required": 3},
         {"successful": 0},
         {"unknown": "value"},
