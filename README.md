@@ -6,8 +6,8 @@ AI agents increasingly depend on unreliable model APIs, tools, databases, and HT
 Agent Chaos intentionally disrupts those dependencies so developers can measure whether an
 agent-like workload tolerates a fault, retries successfully, or fails.
 
-Agent Chaos v0.3 is an early open-source vertical slice. It is framework-independent and does
-not require an OpenAI or Anthropic API key.
+Agent Chaos is an early open-source vertical slice. It is framework-independent and does not
+require an OpenAI or Anthropic API key.
 
 ```mermaid
 flowchart LR
@@ -50,14 +50,16 @@ uv run agentchaos run examples/scenarios/api_latency_recovery.yaml
 uv run agentchaos run examples/scenarios/api_429_recovery.yaml
 uv run agentchaos run examples/scenarios/api_429_failure.yaml
 uv run agentchaos run examples/scenarios/api_503_failure.yaml
+uv run agentchaos run examples/scenarios/api_503_schedule_recovery.yaml
+uv run agentchaos run examples/scenarios/api_503_schedule_incomplete.yaml
 uv run agentchaos run examples/scenarios/http_disconnect_recovery.yaml
 uv run agentchaos run examples/scenarios/http_disconnect_failure.yaml
 uv run agentchaos run examples/scenarios/http_malformed_json_recovery.yaml
 uv run agentchaos run examples/scenarios/http_malformed_json_failure.yaml
 ```
 
-The 429, 503, disconnect, and malformed-JSON failure examples deliberately exit with status 1
-because recovery is not observed.
+The 429, 503, disconnect, malformed-JSON, and incomplete-schedule examples deliberately exit with
+status 1 because the experiment's required recovery or schedule completion is not observed.
 
 ## Scenario
 
@@ -148,11 +150,32 @@ before a complete response arrives. The portable guarantee is a client-visible t
 protocol failure; a literal TCP reset and a particular client-library exception are not
 guaranteed. A matching retry that succeeds through the upstream is classified as recovery.
 
+To inject the same configured fault more than once, use an occurrence schedule:
+
+```yaml
+fault:
+  type: http_error
+  target:
+    method: GET
+    path: /customer/*
+  trigger:
+    occurrences: [2, 4]
+  status_code: 503
+```
+
+Schedule entries must be positive, unique, and strictly increasing. The scalar
+`occurrence: 2` form remains supported as a one-entry schedule. Target-matching retries count
+toward the schedule and can themselves be selected for injection. A schedule is complete only
+when every configured occurrence injects; reaching only part of it fails with
+`FAULT_SCHEDULE_INCOMPLETE` even if every observed failure recovered.
+
 ## Results
 
 - `PASSED`: a baseline succeeds, or the workload tolerates injected latency without failure.
-- `RECOVERED`: a faulted operation fails, a matching retry succeeds, and the workload succeeds.
-- `FAILED`: execution fails, the fault never fires, or no successful recovery is observed.
+- `RECOVERED`: every fault-related failure has its own successful matching retry, and the workload
+  succeeds.
+- `FAILED`: execution fails, the fault never fires, a schedule is incomplete, or any required
+  recovery is not observed.
 
 An injected disconnect always records a failed operation. It produces `RECOVERED` only when a
 matching retry succeeds; an expected workload exit without that retry produces `FAILED`.
@@ -175,8 +198,10 @@ Every valid run contains:
 └── report.json
 ```
 
-`events.jsonl` is a versioned, sequence-ordered event stream. `report.json` provides stable result
-and reason codes plus workload, fault, recovery, timing, and artifact details.
+`events.jsonl` remains a schema-1, sequence-ordered event stream. New runs write schema-2
+`report.json` files with the configured and completed occurrence schedules plus one evidence row
+per fault-related failed operation. Each row identifies its successful retry and recovery latency,
+or uses null values when recovery was not observed.
 
 ## Commands
 
@@ -193,8 +218,9 @@ uv run agentchaos inspect .agentchaos/runs/<run-id>/report.json
 Use `--output-dir PATH` to place run directories somewhere other than `.agentchaos/runs`.
 
 `inspect` accepts either a run directory or its `report.json` file and prints the same result
-summary as `run`. It strictly validates the saved report without running a workload, starting a
-dependency, contacting the network, reading other artifacts, or modifying the run directory.
+summary as `run`. It strictly validates schema-1 and schema-2 saved reports without running a
+workload, starting a dependency, contacting the network, reading other artifacts, migrating the
+report, or modifying the run directory.
 
 ## Documentation
 
@@ -202,6 +228,8 @@ dependency, contacting the network, reading other artifacts, or modifying the ru
   boundaries.
 - [Documentation index](docs/README.md): authority map for specifications, release guidance, and
   archived planning.
+- [v0.4 specification](docs/specs/v0.4.md): approved contract for occurrence schedules and plural
+  recovery evidence.
 - [v0.3 specification](docs/specs/v0.3.md): complete contract for the current released behavior.
 - [v0.2 specification](docs/specs/v0.2.md): immutable contract for the prior release.
 - [v0.1 specification](docs/specs/v0.1.md): immutable contract for the initial release.
@@ -233,8 +261,8 @@ It is useful black-box evidence, not proof of the workload's internal intent.
 
 ## Roadmap
 
-The next logical steps include richer trigger policies and multi-fault campaigns, then another
-dependency adapter such as MCP. These are broad, nonbinding directions; detailed release scope
-begins only in an approved version specification.
+The next logical steps include trigger windows and reproducible probabilistic policies,
+multi-fault campaigns, then another dependency adapter such as MCP. These are broad, nonbinding
+directions; detailed release scope begins only in an approved version specification.
 
 Licensed under Apache-2.0.

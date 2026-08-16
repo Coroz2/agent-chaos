@@ -1,0 +1,33 @@
+schema_version: 1
+name: api-503-schedule-recovery
+
+dependency:
+  type: http
+  base_url: http://127.0.0.1:19109
+  start:
+    command: [python, fake_api.py, --port, "19109"]
+    cwd: ..
+    readiness:
+      path: /health
+
+workload:
+  name: repeated-refresh-demo-agent
+  command: [python, demo_agent.py]
+  cwd: ..
+  env:
+    DEMO_REFRESHES: "2"
+  proxy_url_env: CUSTOMER_API_URL
+
+fault:
+  type: http_error
+  target:
+    method: GET
+    path: /customer/*
+  trigger:
+    occurrences: [2, 4]
+  status_code: 503
+
+success:
+  exit_code: 0
+
+timeout_seconds: 10
