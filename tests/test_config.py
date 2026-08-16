@@ -39,6 +39,17 @@ DISCONNECT_SCENARIO = VALID_SCENARIO.replace("type: http_error", "type: http_dis
 )
 
 
+def scenario_for_fault_type(fault_type: str) -> str:
+    scenario = VALID_SCENARIO.replace("type: http_error", f"type: {fault_type}")
+    if fault_type == "http_latency":
+        return scenario.replace("status_code: 503", "latency_ms: 50")
+    if fault_type == "http_rate_limit":
+        return scenario.replace("status_code: 503", "retry_after_seconds: 1")
+    if fault_type in {"http_malformed_json", "http_disconnect"}:
+        return scenario.replace("  status_code: 503\n", "")
+    return scenario
+
+
 def write_scenario(tmp_path: Path, content: str) -> Path:
     path = tmp_path / "scenario.yaml"
     path.write_text(content, encoding="utf-8")
@@ -52,6 +63,57 @@ def test_valid_scenario_parses_and_normalizes(tmp_path: Path) -> None:
     assert scenario.timeout_seconds == 60
     assert scenario.fault is not None
     assert scenario.fault.target.method == "GET"
+    assert scenario.fault.trigger.schedule == (2,)
+
+
+@pytest.mark.parametrize(
+    "fault_type",
+    [
+        "http_latency",
+        "http_error",
+        "http_rate_limit",
+        "http_malformed_json",
+        "http_disconnect",
+    ],
+)
+@pytest.mark.parametrize("occurrences", ["[2]", "[2, 4]"])
+def test_all_faults_accept_occurrence_schedules(
+    tmp_path: Path, fault_type: str, occurrences: str
+) -> None:
+    content = scenario_for_fault_type(fault_type).replace(
+        "occurrence: 2", f"occurrences: {occurrences}"
+    )
+
+    scenario = load_scenario(write_scenario(tmp_path, content))
+
+    assert scenario.fault is not None
+    assert scenario.fault.trigger.schedule == tuple(
+        int(value) for value in occurrences[1:-1].split(", ")
+    )
+
+
+@pytest.mark.parametrize(
+    "trigger",
+    [
+        "{}",
+        "{occurrence: 2, occurrences: [2, 4]}",
+        "{occurrences: []}",
+        "{occurrences: [2, 2]}",
+        "{occurrences: [4, 2]}",
+        "{occurrences: [0, 2]}",
+        "{occurrences: [-1, 2]}",
+        "{occurrences: [true, 2]}",
+        "{occurrences: [1.5, 2]}",
+        "{occurrence: true}",
+        "{occurrence: 2.0}",
+        "{occurrences: [2], unknown: 3}",
+    ],
+)
+def test_occurrence_trigger_rejects_invalid_forms(tmp_path: Path, trigger: str) -> None:
+    invalid = VALID_SCENARIO.replace("trigger:\n    occurrence: 2", f"trigger: {trigger}")
+
+    with pytest.raises(ScenarioLoadError):
+        load_scenario(write_scenario(tmp_path, invalid))
 
 
 @pytest.mark.parametrize("retry_after_seconds", [0, 1, 86400])

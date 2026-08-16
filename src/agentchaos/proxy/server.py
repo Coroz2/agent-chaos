@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import socket
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import cast
 from uuid import uuid4
@@ -77,7 +78,7 @@ class ChaosProxy:
         self.upstream_url = upstream_url.rstrip("/")
         self.fault = fault
         self.recorder = recorder
-        self.trigger = None if fault is None else OccurrenceTrigger(fault.trigger.occurrence)
+        self.trigger = None if fault is None else OccurrenceTrigger(fault.trigger.schedule)
         self._target_matcher = (
             None if fault is None else HttpTargetMatcher.from_config(fault.target)
         )
@@ -85,8 +86,9 @@ class ChaosProxy:
             None if fault is None else build_http_fault_executor(fault)
         )
         self._client = httpx.AsyncClient(follow_redirects=False, trust_env=False)
+        self._selection_lock = asyncio.Lock()
         self._state_lock = asyncio.Lock()
-        self._fault_operation: FaultOperationState | None = None
+        self._fault_operations: dict[str, deque[FaultOperationState]] = {}
         self._server: uvicorn.Server | None = None
         self._server_task: asyncio.Task[None] | None = None
         self._socket: socket.socket | None = None
@@ -145,35 +147,15 @@ class ChaosProxy:
         query_hash = hashlib.sha256(query).hexdigest()
         body_hash = hashlib.sha256(body or b"").hexdigest()
         fingerprint = self._fingerprint(request.method, path, query_hash, body_hash)
-        await self.recorder.emit(
-            "proxy",
-            OperationObservedPayload(
-                operation_id=operation_id,
-                method=request.method,
-                path=path,
-                query_hash=query_hash,
-                body_hash=body_hash,
-                fingerprint=fingerprint,
-            ),
+        retry_state, fault_state = await self._begin_operation(
+            operation_id=operation_id,
+            method=request.method,
+            path=path,
+            query_hash=query_hash,
+            body_hash=body_hash,
+            fingerprint=fingerprint,
+            can_inject=body is not None,
         )
-
-        retry_state, emit_inferred_failure = await self._register_retry(operation_id, fingerprint)
-        if emit_inferred_failure and retry_state is not None:
-            await self._emit_failure(
-                retry_state,
-                failure_kind="client_timeout_inferred",
-                status_code=None,
-            )
-        if retry_state is not None:
-            await self.recorder.emit(
-                "proxy",
-                RetryObservedPayload(
-                    operation_id=operation_id,
-                    retry_of_operation_id=retry_state.operation_id,
-                    fingerprint=fingerprint,
-                    attempt=retry_state.retry_attempts,
-                ),
-            )
 
         if body is None:
             await self._emit_plain_failure(
@@ -181,22 +163,9 @@ class ChaosProxy:
             )
             return JSONResponse({"error": "request body exceeds proxy limit"}, status_code=413)
 
-        inject = await self._should_inject(request.method, path)
-        fault_state: FaultOperationState | None = None
-        if inject:
+        if fault_state is not None:
             executor = self._fault_executor
             assert executor is not None
-            fault_state = FaultOperationState(operation_id, fingerprint, executor.fault_type)
-            async with self._state_lock:
-                self._fault_operation = fault_state
-            await self.recorder.emit(
-                "proxy",
-                FaultInjectedPayload(
-                    operation_id=operation_id,
-                    fault_type=executor.fault_type,
-                    parameters=executor.event_parameters(),
-                ),
-            )
             injected_response = await self._execute_fault(request, executor, fault_state)
             if injected_response is not None:
                 return injected_response
@@ -204,10 +173,7 @@ class ChaosProxy:
         response = await self._forward(request, body)
         duration_ms = round((time.monotonic() - started) * 1000)
         if response.status_code < 400:
-            if fault_state is not None:
-                fault_state.status = "succeeded"
-            await self.recorder.emit(
-                "proxy",
+            await self._emit_success(
                 OperationSucceededPayload(
                     operation_id=operation_id,
                     fingerprint=fingerprint,
@@ -215,6 +181,8 @@ class ChaosProxy:
                     duration_ms=duration_ms,
                     fault_related=fault_state is not None or retry_state is not None,
                 ),
+                fault_state=fault_state,
+                retry_state=retry_state,
             )
         else:
             failure_kind = "upstream_http_error" if response.status_code != 502 else "proxy_error"
@@ -231,24 +199,121 @@ class ChaosProxy:
                 )
         return response
 
+    async def _begin_operation(
+        self,
+        *,
+        operation_id: str,
+        method: str,
+        path: str,
+        query_hash: str,
+        body_hash: str,
+        fingerprint: str,
+        can_inject: bool,
+    ) -> tuple[FaultOperationState | None, FaultOperationState | None]:
+        observed = OperationObservedPayload(
+            operation_id=operation_id,
+            method=method,
+            path=path,
+            query_hash=query_hash,
+            body_hash=body_hash,
+            fingerprint=fingerprint,
+        )
+        matching = (
+            self._target_matcher is not None
+            and self.trigger is not None
+            and self._target_matcher.matches(method, path)
+        )
+        if matching:
+            assert self.trigger is not None
+            async with self._selection_lock:
+                await self.recorder.emit("proxy", observed)
+                retry_state = await self._register_retry(operation_id, fingerprint)
+                inject = can_inject and await self.trigger.evaluate()
+                fault_state = (
+                    await self._register_fault_operation(operation_id, fingerprint)
+                    if inject
+                    else None
+                )
+                return retry_state, fault_state
+
+        await self.recorder.emit("proxy", observed)
+        retry_state = await self._register_retry(operation_id, fingerprint)
+        return retry_state, None
+
     async def _register_retry(
         self, operation_id: str, fingerprint: str
-    ) -> tuple[FaultOperationState | None, bool]:
+    ) -> FaultOperationState | None:
         async with self._state_lock:
-            state = self._fault_operation
-            if (
-                state is None
-                or state.operation_id == operation_id
-                or state.fingerprint != fingerprint
-                or state.status == "succeeded"
-            ):
-                return None, False
-            emit_inferred_failure = state.status == "pending" and not state.failure_emitted
+            queue = self._fault_operations.get(fingerprint)
+            if not queue:
+                return None
+            state = queue[0]
             if state.status == "pending":
-                state.status = "failed"
+                await self._emit_failure_locked(
+                    state,
+                    failure_kind="client_timeout_inferred",
+                    status_code=None,
+                )
             state.retry_attempts += 1
             state.retry_seen.set()
-            return state, emit_inferred_failure
+            await self.recorder.emit(
+                "proxy",
+                RetryObservedPayload(
+                    operation_id=operation_id,
+                    retry_of_operation_id=state.operation_id,
+                    fingerprint=fingerprint,
+                    attempt=state.retry_attempts,
+                ),
+            )
+            return state
+
+    async def _register_fault_operation(
+        self, operation_id: str, fingerprint: str
+    ) -> FaultOperationState:
+        executor = self._fault_executor
+        assert executor is not None
+        state = FaultOperationState(operation_id, fingerprint, executor.fault_type)
+        async with self._state_lock:
+            self._fault_operations.setdefault(fingerprint, deque()).append(state)
+            await self.recorder.emit(
+                "proxy",
+                FaultInjectedPayload(
+                    operation_id=operation_id,
+                    fault_type=executor.fault_type,
+                    parameters=executor.event_parameters(),
+                ),
+            )
+        return state
+
+    async def _emit_success(
+        self,
+        payload: OperationSucceededPayload,
+        *,
+        fault_state: FaultOperationState | None,
+        retry_state: FaultOperationState | None,
+    ) -> None:
+        if fault_state is None and retry_state is None:
+            await self.recorder.emit("proxy", payload)
+            return
+        async with self._state_lock:
+            if fault_state is not None:
+                fault_state.status = "succeeded"
+                self._remove_fault_operation_locked(fault_state)
+            await self.recorder.emit("proxy", payload)
+            if retry_state is not None:
+                retry_state.status = "succeeded"
+                self._remove_fault_operation_locked(retry_state)
+
+    def _remove_fault_operation_locked(self, state: FaultOperationState) -> None:
+        queue = self._fault_operations.get(state.fingerprint)
+        if queue is None:
+            return
+        try:
+            queue.remove(state)
+        except ValueError:
+            return
+        if not queue:
+            del self._fault_operations[state.fingerprint]
 
     async def _execute_fault(
         self,
@@ -303,13 +368,6 @@ class ChaosProxy:
             media_type=response.media_type,
         )
 
-    async def _should_inject(self, method: str, path: str) -> bool:
-        if self._target_matcher is None or self.trigger is None:
-            return False
-        if not self._target_matcher.matches(method, path):
-            return False
-        return await self.trigger.evaluate()
-
     async def _forward(self, request: Request, body: bytes) -> Response:
         headers = [
             (name, value)
@@ -362,8 +420,18 @@ class ChaosProxy:
         failure_kind: str,
         status_code: int | None,
     ) -> None:
+        async with self._state_lock:
+            await self._emit_failure_locked(state, failure_kind, status_code)
+
+    async def _emit_failure_locked(
+        self,
+        state: FaultOperationState,
+        failure_kind: str,
+        status_code: int | None,
+    ) -> None:
         if state.failure_emitted:
             return
+        state.status = "failed"
         state.failure_emitted = True
         await self._emit_plain_failure(
             state.operation_id,

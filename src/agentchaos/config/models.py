@@ -6,7 +6,15 @@ import re
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+    AnyHttpUrl,
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictInt,
+    field_validator,
+    model_validator,
+)
 
 
 class StrictModel(BaseModel):
@@ -82,7 +90,30 @@ class FaultTarget(StrictModel):
 
 
 class OccurrenceTriggerConfig(StrictModel):
-    occurrence: int = Field(gt=0)
+    occurrence: StrictInt | None = Field(default=None, gt=0)
+    occurrences: tuple[Annotated[StrictInt, Field(gt=0)], ...] | None = Field(
+        default=None,
+        min_length=1,
+    )
+
+    @model_validator(mode="after")
+    def validate_trigger_form(self) -> OccurrenceTriggerConfig:
+        if (self.occurrence is None) == (self.occurrences is None):
+            raise ValueError("specify exactly one of occurrence or occurrences")
+        if self.occurrences is not None and any(
+            current >= following
+            for current, following in zip(self.occurrences, self.occurrences[1:], strict=False)
+        ):
+            raise ValueError("occurrences must be in strictly increasing order")
+        return self
+
+    @property
+    def schedule(self) -> tuple[int, ...]:
+        """Return the normalized occurrence schedule."""
+        if self.occurrences is not None:
+            return self.occurrences
+        assert self.occurrence is not None
+        return (self.occurrence,)
 
 
 class HttpLatencyFault(StrictModel):
