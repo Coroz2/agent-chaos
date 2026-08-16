@@ -4,14 +4,14 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from agentchaos.reporting.models import Report
+from agentchaos.reporting.models import Report, ReportDocument
 
 
 class ReportReadError(ValueError):
     """A safe, user-facing saved-report validation error."""
 
 
-def load_report(input_path: Path) -> tuple[Report, Path]:
+def load_report(input_path: Path) -> tuple[ReportDocument, Path]:
     """Resolve and strictly validate a saved report."""
     candidate = input_path / "report.json" if input_path.is_dir() else input_path
     try:

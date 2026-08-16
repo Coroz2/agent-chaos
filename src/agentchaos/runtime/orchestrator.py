@@ -27,8 +27,9 @@ from agentchaos.events.recorder import EventRecorder
 from agentchaos.proxy.server import ChaosProxy
 from agentchaos.reporting.models import (
     ArtifactReport,
-    FaultReport,
-    RecoveryReport,
+    FaultReportV2,
+    RecoveryEvidenceReport,
+    RecoveryReportV2,
     Report,
     TimingReport,
     WorkloadReport,
@@ -242,6 +243,7 @@ def _build_report(
     started_at = events[0].timestamp
     completed_at = events[-1].timestamp
     return Report(
+        schema_version=2,
         run_id=run_id,
         scenario_name=scenario.name,
         result=analysis.result,
@@ -260,16 +262,25 @@ def _build_report(
             timed_out=analysis.workload_timed_out,
             interrupted=analysis.workload_interrupted,
         ),
-        fault=FaultReport(
+        fault=FaultReportV2(
             configured=scenario.fault is not None,
             type=None if scenario.fault is None else scenario.fault.type,
             injected=analysis.faults_injected > 0,
+            scheduled_occurrences=analysis.scheduled_occurrences,
+            completed_occurrences=analysis.completed_occurrences,
+            schedule_completed=(analysis.completed_occurrences == analysis.scheduled_occurrences),
         ),
-        recovery=RecoveryReport(
-            observed=analysis.recovery_observed,
-            failed_operation_id=analysis.failed_operation_id,
-            retry_operation_id=analysis.retry_operation_id,
-            recovery_latency_ms=analysis.recovery_latency_ms,
+        recovery=RecoveryReportV2(
+            required=analysis.recoveries_required,
+            successful=analysis.recoveries_successful,
+            evidence=tuple(
+                RecoveryEvidenceReport(
+                    failed_operation_id=row.failed_operation_id,
+                    successful_retry_operation_id=row.successful_retry_operation_id,
+                    recovery_latency_ms=row.recovery_latency_ms,
+                )
+                for row in analysis.recovery_evidence
+            ),
         ),
         timing=TimingReport(started_at=started_at, completed_at=completed_at),
         artifacts=ArtifactReport(
