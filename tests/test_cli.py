@@ -254,11 +254,10 @@ def test_schema_two_summary_renderer_exact_output(tmp_path: Path) -> None:
         "\nExperiment complete.\n\n"
         "Result: RECOVERED\n"
         "Reason: RECOVERY_OBSERVED\n\n"
-        "Faults injected:       2\n"
+        "Faults injected:       2/2\n"
         "Failed operations:     2\n"
         "Retries:               2\n"
-        "Recoveries required:   2\n"
-        "Recoveries successful: 2\n"
+        "Successful recoveries: 2/2\n"
         "Duration:              1.23s\n"
         f"\nReport:\n{report_path}\n"
     )
@@ -337,12 +336,12 @@ def _report_v2() -> Report:
             evidence=(
                 RecoveryEvidenceReport(
                     failed_operation_id="failed-one",
-                    successful_retry_operation_id="retry-one",
+                    retry_operation_id="retry-one",
                     recovery_latency_ms=10,
                 ),
                 RecoveryEvidenceReport(
                     failed_operation_id="failed-two",
-                    successful_retry_operation_id="retry-two",
+                    retry_operation_id="retry-two",
                     recovery_latency_ms=20,
                 ),
             ),

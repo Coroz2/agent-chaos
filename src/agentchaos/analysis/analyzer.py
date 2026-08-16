@@ -27,7 +27,7 @@ class ExperimentResult(StrEnum):
 @dataclass(frozen=True, slots=True)
 class RecoveryEvidence:
     failed_operation_id: str
-    successful_retry_operation_id: str | None
+    retry_operation_id: str | None
     recovery_latency_ms: int | None
 
 
@@ -55,7 +55,7 @@ class AnalysisResult:
 
     @property
     def recoveries_successful(self) -> int:
-        return sum(row.successful_retry_operation_id is not None for row in self.recovery_evidence)
+        return sum(row.retry_operation_id is not None for row in self.recovery_evidence)
 
     @property
     def recovery_observed(self) -> bool:
@@ -72,7 +72,7 @@ class AnalysisResult:
     def retry_operation_id(self) -> str | None:
         if not self.recovery_evidence:
             return None
-        return self.recovery_evidence[0].successful_retry_operation_id
+        return self.recovery_evidence[0].retry_operation_id
 
     @property
     def recovery_latency_ms(self) -> int | None:
@@ -120,9 +120,7 @@ def analyze(scenario: Scenario, events: tuple[Event, ...]) -> AnalysisResult:
     fault_failures = [(event, payload) for event, payload in failures if payload.fault_related]
     recovery_evidence = _build_recovery_evidence(fault_failures, retries, successes)
     recoveries_required = len(recovery_evidence)
-    recoveries_successful = sum(
-        row.successful_retry_operation_id is not None for row in recovery_evidence
-    )
+    recoveries_successful = sum(row.retry_operation_id is not None for row in recovery_evidence)
 
     if run_error is not None:
         reason_code = run_error.reason_code
@@ -197,11 +195,7 @@ def analyze(scenario: Scenario, events: tuple[Event, ...]) -> AnalysisResult:
 def _configured_schedule(scenario: Scenario) -> tuple[int, ...]:
     if scenario.fault is None:
         return ()
-    trigger = scenario.fault.trigger
-    schedule = getattr(trigger, "schedule", None)
-    if schedule is not None:
-        return tuple(schedule)
-    return (trigger.occurrence,)
+    return scenario.fault.trigger.schedule
 
 
 def _build_recovery_evidence(
@@ -216,7 +210,7 @@ def _build_recovery_evidence(
     used_successful_operations: set[str] = set()
     evidence: list[RecoveryEvidence] = []
     for failure_event, failure_payload in failures:
-        successful_retry_operation_id: str | None = None
+        retry_operation_id: str | None = None
         recovery_latency_ms: int | None = None
         for retry_event, retry_payload in retries:
             if (
@@ -235,14 +229,14 @@ def _build_recovery_evidence(
             )
             if success_event is None:
                 continue
-            successful_retry_operation_id = retry_payload.operation_id
+            retry_operation_id = retry_payload.operation_id
             recovery_latency_ms = max(0, success_event.elapsed_ms - failure_event.elapsed_ms)
             used_successful_operations.add(retry_payload.operation_id)
             break
         evidence.append(
             RecoveryEvidence(
                 failed_operation_id=failure_payload.operation_id,
-                successful_retry_operation_id=successful_retry_operation_id,
+                retry_operation_id=retry_operation_id,
                 recovery_latency_ms=recovery_latency_ms,
             )
         )

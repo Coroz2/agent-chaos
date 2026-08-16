@@ -634,13 +634,13 @@ async def test_latency_retry_preserves_inferred_timeout_event_order(tmp_path: Pa
         "http_disconnect",
     ],
 )
-async def test_fault_injection_fires_once_under_concurrency(
+async def test_fault_schedule_fires_exactly_under_concurrency(
     tmp_path: Path, fault_type: str
 ) -> None:
     fault_data = {
         "type": fault_type,
         "target": {"path": "/concurrent"},
-        "trigger": {"occurrence": 5},
+        "trigger": {"occurrences": [5, 10]},
     }
     fault: FaultConfig
     if fault_type == "http_latency":
@@ -666,30 +666,48 @@ async def test_fault_injection_fires_once_under_concurrency(
     responses = [result for result in results if isinstance(result, httpx.Response)]
     errors = [result for result in results if isinstance(result, BaseException)]
     injected = [event for event in recorder.events if event.event_type == EventType.FAULT_INJECTED]
-    assert len(injected) == 1
-    assert injected[0].payload.fault_type == fault_type
+    failures = [
+        event
+        for event in recorder.events
+        if event.event_type == EventType.OPERATION_FAILED and event.payload.fault_related
+    ]
+    assert len(injected) == 2
+    assert all(event.payload.fault_type == fault_type for event in injected)
     assert proxy.trigger is not None
     assert proxy.trigger.count == 20
     assert proxy.trigger.fired is True
+    assert proxy.trigger.completed_occurrences == (5, 10)
+    assert proxy.trigger.complete is True
+    expected_failure_kind = {
+        "http_error": "injected_http_error",
+        "http_rate_limit": "injected_rate_limit",
+        "http_malformed_json": "injected_malformed_json",
+        "http_disconnect": "injected_disconnect",
+    }.get(fault_type)
+    if expected_failure_kind is not None:
+        assert [event.payload.failure_kind for event in failures] == [
+            expected_failure_kind,
+            expected_failure_kind,
+        ]
     if fault_type == "http_disconnect":
-        assert len(responses) == 19
-        assert len(errors) == 1
-        assert isinstance(errors[0], httpx.TransportError)
+        assert len(responses) == 18
+        assert len(errors) == 2
+        assert all(isinstance(error, httpx.TransportError) for error in errors)
         assert all(response.status_code == 200 for response in responses)
-        assert UPSTREAM_PATHS == ["/concurrent"] * 19
+        assert UPSTREAM_PATHS == ["/concurrent"] * 18
     else:
         assert errors == []
     if fault_type == "http_error":
-        assert sum(response.status_code == 503 for response in responses) == 1
+        assert sum(response.status_code == 503 for response in responses) == 2
     elif fault_type == "http_rate_limit":
-        assert sum(response.status_code == 429 for response in responses) == 1
+        assert sum(response.status_code == 429 for response in responses) == 2
     elif fault_type == "http_malformed_json":
         assert (
             sum(
                 response.headers.get("x-agent-chaos-fault") == "http_malformed_json"
                 for response in responses
             )
-            == 1
+            == 2
         )
 
 

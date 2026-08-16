@@ -508,7 +508,7 @@ def test_plural_recovery_evidence_is_ordered_and_complete() -> None:
         "failed-one",
         "failed-two",
     ]
-    assert [row.successful_retry_operation_id for row in result.recovery_evidence] == [
+    assert [row.retry_operation_id for row in result.recovery_evidence] == [
         "retry-one",
         "retry-two",
     ]

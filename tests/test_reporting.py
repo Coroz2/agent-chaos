@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -78,13 +79,44 @@ def test_report_versions_reject_mixed_nested_shapes() -> None:
     report = schema_two_report()
 
     with pytest.raises(ValidationError):
-        Report.model_validate(
-            report.model_dump(mode="json")
-            | {
-                "schema_version": 1,
-            },
-            strict=True,
-        )
+        validate_json_payload(report.model_dump(mode="json") | {"schema_version": 1})
+
+
+def test_schema_two_report_preserves_over_injection_internal_error() -> None:
+    payload = schema_two_report().model_dump(mode="json")
+    payload |= {
+        "result": "FAILED",
+        "reason_code": "INTERNAL_ERROR",
+        "faults_injected": 2,
+    }
+
+    report = validate_json_payload(payload)
+
+    assert report.faults_injected == 2
+
+
+def test_schema_two_report_rejects_unexplained_injection_count_mismatch() -> None:
+    payload = schema_two_report().model_dump(mode="json")
+    payload["faults_injected"] = 2
+
+    with pytest.raises(ValidationError):
+        validate_json_payload(payload)
+
+
+def test_schema_two_baseline_rejects_recovery_evidence() -> None:
+    payload = schema_two_report().model_dump(mode="json")
+    payload["faults_injected"] = 0
+    payload["fault"] = {
+        "configured": False,
+        "type": None,
+        "injected": False,
+        "scheduled_occurrences": [],
+        "completed_occurrences": [],
+        "schedule_completed": True,
+    }
+
+    with pytest.raises(ValidationError):
+        validate_json_payload(payload)
 
 
 @pytest.mark.parametrize(
@@ -97,7 +129,7 @@ def test_report_versions_reject_mixed_nested_shapes() -> None:
             "evidence": [
                 {
                     "failed_operation_id": "failed",
-                    "successful_retry_operation_id": "retry",
+                    "retry_operation_id": "retry",
                     "recovery_latency_ms": None,
                 }
             ]
@@ -109,7 +141,7 @@ def test_schema_two_recovery_evidence_is_strict(change: dict[str, object]) -> No
     payload["recovery"] |= change
 
     with pytest.raises(ValidationError):
-        Report.model_validate(payload, strict=True)
+        validate_json_payload(payload)
 
 
 @pytest.mark.parametrize(
@@ -127,7 +159,11 @@ def test_schema_two_fault_schedule_is_strict(change: dict[str, object]) -> None:
     payload["fault"] |= change
 
     with pytest.raises(ValidationError):
-        Report.model_validate(payload, strict=True)
+        validate_json_payload(payload)
+
+
+def validate_json_payload(payload: dict[str, object]) -> Report:
+    return Report.model_validate_json(json.dumps(payload), strict=True)
 
 
 def schema_two_report() -> Report:
@@ -161,7 +197,7 @@ def schema_two_report() -> Report:
             evidence=(
                 RecoveryEvidenceReport(
                     failed_operation_id="failed",
-                    successful_retry_operation_id="retry",
+                    retry_operation_id="retry",
                     recovery_latency_ms=10,
                 ),
             ),

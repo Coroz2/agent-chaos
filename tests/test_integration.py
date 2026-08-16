@@ -200,8 +200,8 @@ async def test_demo_scenarios_end_to_end(
     assert execution.report.failed_operations == expected_failures
     assert execution.report.retries_observed == expected_retries
     assert execution.report.schema_version == 2
-    assert execution.report.fault.scheduled_occurrences == expected_schedule
-    assert execution.report.fault.completed_occurrences == expected_completed
+    assert execution.report.fault.scheduled_occurrences == tuple(expected_schedule)
+    assert execution.report.fault.completed_occurrences == tuple(expected_completed)
     assert execution.report.fault.schedule_completed == (expected_completed == expected_schedule)
     assert execution.report.recovery.required == expected_failures
     assert execution.report.recovery.successful == expected_recoveries
@@ -209,10 +209,10 @@ async def test_demo_scenarios_end_to_end(
     for index, evidence in enumerate(execution.report.recovery.evidence):
         assert evidence.failed_operation_id
         if index < expected_recoveries:
-            assert evidence.successful_retry_operation_id is not None
+            assert evidence.retry_operation_id is not None
             assert evidence.recovery_latency_ms is not None
         else:
-            assert evidence.successful_retry_operation_id is None
+            assert evidence.retry_operation_id is None
             assert evidence.recovery_latency_ms is None
     assert (execution.run_dir / "report.json").exists()
     assert (execution.run_dir / "events.jsonl").exists()
@@ -254,12 +254,12 @@ async def test_demo_scenarios_end_to_end(
     elif filename == "api_503_schedule_recovery.yaml":
         inspection = runner.invoke(app, ["inspect", str(execution.run_dir)])
         assert inspection.exit_code == 0
-        assert "Recoveries required:   2" in inspection.output
-        assert "Recoveries successful: 2" in inspection.output
+        assert "Faults injected:       2/2" in inspection.output
+        assert "Successful recoveries: 2/2" in inspection.output
     elif filename == "api_503_schedule_incomplete.yaml":
         inspection = runner.invoke(app, ["inspect", str(execution.run_dir)])
         assert inspection.exit_code == 0
         assert "Result: FAILED" in inspection.output
         assert "Reason: FAULT_SCHEDULE_INCOMPLETE" in inspection.output
-        assert "Recoveries required:   1" in inspection.output
-        assert "Recoveries successful: 1" in inspection.output
+        assert "Faults injected:       1/2" in inspection.output
+        assert "Successful recoveries: 1/1" in inspection.output

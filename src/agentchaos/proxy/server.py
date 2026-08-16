@@ -249,6 +249,8 @@ class ChaosProxy:
                 return None
             state = queue[0]
             if state.status == "pending":
+                if state.fault_type != "http_latency":
+                    return None
                 await self._emit_failure_locked(
                     state,
                     failure_kind="client_timeout_inferred",

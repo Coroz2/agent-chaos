@@ -82,12 +82,12 @@ class FaultReportV2(ReportModel):
 
 class RecoveryEvidenceReport(ReportModel):
     failed_operation_id: str
-    successful_retry_operation_id: str | None
+    retry_operation_id: str | None
     recovery_latency_ms: int | None = Field(ge=0)
 
     @model_validator(mode="after")
     def validate_success_fields(self) -> RecoveryEvidenceReport:
-        if (self.successful_retry_operation_id is None) != (self.recovery_latency_ms is None):
+        if (self.retry_operation_id is None) != (self.recovery_latency_ms is None):
             raise ValueError("successful retry and recovery latency must be present together")
         return self
 
@@ -102,9 +102,7 @@ class RecoveryReportV2(ReportModel):
         if self.required != len(self.evidence):
             raise ValueError("required must equal the number of recovery evidence rows")
         successful = [
-            row.successful_retry_operation_id
-            for row in self.evidence
-            if row.successful_retry_operation_id is not None
+            row.retry_operation_id for row in self.evidence if row.retry_operation_id is not None
         ]
         if self.successful != len(successful):
             raise ValueError("successful must equal the number of resolved evidence rows")
@@ -150,7 +148,22 @@ class Report(ReportModel):
         ):
             raise ValueError("schema-2 reports require schema-2 fault and recovery objects")
         elif self.faults_injected != len(self.fault.completed_occurrences):
-            raise ValueError("faults_injected must equal completed scheduled occurrences")
+            over_injection = (
+                self.result == ExperimentResult.FAILED
+                and self.reason_code == "INTERNAL_ERROR"
+                and self.faults_injected > len(self.fault.completed_occurrences)
+                and self.fault.schedule_completed
+            )
+            if not over_injection:
+                raise ValueError("faults_injected must equal completed scheduled occurrences")
+        if (
+            self.schema_version == 2
+            and isinstance(self.fault, FaultReportV2)
+            and isinstance(self.recovery, RecoveryReportV2)
+            and not self.fault.configured
+            and self.recovery.required != 0
+        ):
+            raise ValueError("baseline reports cannot contain recovery evidence")
         return self
 
 

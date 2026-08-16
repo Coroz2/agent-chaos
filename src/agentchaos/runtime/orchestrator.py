@@ -276,7 +276,7 @@ def _build_report(
             evidence=tuple(
                 RecoveryEvidenceReport(
                     failed_operation_id=row.failed_operation_id,
-                    successful_retry_operation_id=row.successful_retry_operation_id,
+                    retry_operation_id=row.retry_operation_id,
                     recovery_latency_ms=row.recovery_latency_ms,
                 )
                 for row in analysis.recovery_evidence
