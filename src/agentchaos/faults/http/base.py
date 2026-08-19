@@ -17,6 +17,10 @@ HttpFaultType = Literal[
 ]
 
 
+async def _allow_forwarding() -> bool:
+    return True
+
+
 class HttpFaultAction(StrEnum):
     """Disposition returned by an injected HTTP fault executor."""
 
@@ -52,6 +56,7 @@ class HttpFaultExecutionContext:
 
     retry_seen: asyncio.Event
     is_disconnected: Callable[[], Awaitable[bool]]
+    begin_forwarding: Callable[[], Awaitable[bool]] = _allow_forwarding
 
 
 class HttpFaultExecutor(Protocol):

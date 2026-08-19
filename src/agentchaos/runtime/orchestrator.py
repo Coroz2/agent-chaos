@@ -7,6 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
 from agentchaos.analysis.analyzer import AnalysisResult, ExperimentResult, analyze
@@ -27,8 +28,9 @@ from agentchaos.events.recorder import EventRecorder
 from agentchaos.proxy.server import ChaosProxy
 from agentchaos.reporting.models import (
     ArtifactReport,
-    FaultReport,
-    RecoveryReport,
+    FaultReportV2,
+    RecoveryEvidenceReport,
+    RecoveryReportV2,
     Report,
     TimingReport,
     WorkloadReport,
@@ -73,6 +75,7 @@ async def run_experiment(
 
     async with EventRecorder(events_path, run_id, listener=event_listener) as recorder:
         await recorder.emit("orchestrator", RunStartedPayload(scenario_name=scenario.name))
+        dependency_evidence_url = _safe_url_for_evidence(str(scenario.dependency.base_url))
         try:
             if scenario.dependency.start is not None:
                 start = scenario.dependency.start
@@ -94,7 +97,7 @@ async def run_experiment(
                     await recorder.emit(
                         "dependency",
                         DependencyStartedPayload(
-                            base_url=str(scenario.dependency.base_url),
+                            base_url=dependency_evidence_url,
                             pid=dependency_process.pid,
                         ),
                     )
@@ -108,7 +111,7 @@ async def run_experiment(
                     await recorder.emit(
                         "dependency",
                         DependencyReadyPayload(
-                            base_url=str(scenario.dependency.base_url),
+                            base_url=dependency_evidence_url,
                             readiness_path=readiness.path,
                         ),
                     )
@@ -137,7 +140,7 @@ async def run_experiment(
                 "injector",
                 InjectorStartedPayload(
                     proxy_url=proxy_url,
-                    upstream_url=str(scenario.dependency.base_url),
+                    upstream_url=dependency_evidence_url,
                 ),
             )
 
@@ -232,6 +235,18 @@ class _RunAborted(Exception):
     pass
 
 
+def _safe_url_for_evidence(url: str) -> str:
+    """Remove credentials, query values, and fragments from a lifecycle URL."""
+    parsed = urlsplit(url)
+    hostname = parsed.hostname or ""
+    if ":" in hostname and not hostname.startswith("["):
+        hostname = f"[{hostname}]"
+    netloc = hostname
+    if parsed.port is not None:
+        netloc = f"{netloc}:{parsed.port}"
+    return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
+
+
 def _build_report(
     run_id: str,
     scenario: Scenario,
@@ -242,6 +257,7 @@ def _build_report(
     started_at = events[0].timestamp
     completed_at = events[-1].timestamp
     return Report(
+        schema_version=2,
         run_id=run_id,
         scenario_name=scenario.name,
         result=analysis.result,
@@ -260,16 +276,25 @@ def _build_report(
             timed_out=analysis.workload_timed_out,
             interrupted=analysis.workload_interrupted,
         ),
-        fault=FaultReport(
+        fault=FaultReportV2(
             configured=scenario.fault is not None,
             type=None if scenario.fault is None else scenario.fault.type,
             injected=analysis.faults_injected > 0,
+            scheduled_occurrences=analysis.scheduled_occurrences,
+            completed_occurrences=analysis.completed_occurrences,
+            schedule_completed=(analysis.completed_occurrences == analysis.scheduled_occurrences),
         ),
-        recovery=RecoveryReport(
-            observed=analysis.recovery_observed,
-            failed_operation_id=analysis.failed_operation_id,
-            retry_operation_id=analysis.retry_operation_id,
-            recovery_latency_ms=analysis.recovery_latency_ms,
+        recovery=RecoveryReportV2(
+            required=analysis.recoveries_required,
+            successful=analysis.recoveries_successful,
+            evidence=tuple(
+                RecoveryEvidenceReport(
+                    failed_operation_id=row.failed_operation_id,
+                    retry_operation_id=row.retry_operation_id,
+                    recovery_latency_ms=row.recovery_latency_ms,
+                )
+                for row in analysis.recovery_evidence
+            ),
         ),
         timing=TimingReport(started_at=started_at, completed_at=completed_at),
         artifacts=ArtifactReport(

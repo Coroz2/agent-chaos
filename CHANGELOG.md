@@ -7,6 +7,14 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Deterministic occurrence schedules that repeat one configured HTTP fault at strictly increasing
+  matching-request ordinals, including retries.
+- Schema-2 reports with schedule completion and separate recovery evidence for every fault-related
+  failure, plus read-only inspection compatibility for schema-1 and schema-2 reports.
+- Managed offline examples for complete plural recovery and a partially reached schedule.
+
 ## [0.3.0] - 2026-08-15
 
 ### Added

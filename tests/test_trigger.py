@@ -17,6 +17,17 @@ async def test_occurrence_trigger_fires_once() -> None:
 
 
 @pytest.mark.asyncio
+async def test_occurrence_trigger_selects_each_scheduled_ordinal() -> None:
+    trigger = OccurrenceTrigger((2, 4))
+
+    results = [await trigger.evaluate() for _ in range(6)]
+
+    assert results == [False, True, False, True, False, False]
+    assert trigger.completed_occurrences == (2, 4)
+    assert trigger.complete is True
+
+
+@pytest.mark.asyncio
 async def test_occurrence_trigger_is_concurrency_safe() -> None:
     trigger = OccurrenceTrigger(25)
     results = await asyncio.gather(*(trigger.evaluate() for _ in range(100)))

@@ -39,6 +39,17 @@ DISCONNECT_SCENARIO = VALID_SCENARIO.replace("type: http_error", "type: http_dis
 )
 
 
+def scenario_for_fault_type(fault_type: str) -> str:
+    scenario = VALID_SCENARIO.replace("type: http_error", f"type: {fault_type}")
+    if fault_type == "http_latency":
+        return scenario.replace("status_code: 503", "latency_ms: 50")
+    if fault_type == "http_rate_limit":
+        return scenario.replace("status_code: 503", "retry_after_seconds: 1")
+    if fault_type in {"http_malformed_json", "http_disconnect"}:
+        return scenario.replace("  status_code: 503\n", "")
+    return scenario
+
+
 def write_scenario(tmp_path: Path, content: str) -> Path:
     path = tmp_path / "scenario.yaml"
     path.write_text(content, encoding="utf-8")
@@ -52,6 +63,57 @@ def test_valid_scenario_parses_and_normalizes(tmp_path: Path) -> None:
     assert scenario.timeout_seconds == 60
     assert scenario.fault is not None
     assert scenario.fault.target.method == "GET"
+    assert scenario.fault.trigger.schedule == (2,)
+
+
+@pytest.mark.parametrize(
+    "fault_type",
+    [
+        "http_latency",
+        "http_error",
+        "http_rate_limit",
+        "http_malformed_json",
+        "http_disconnect",
+    ],
+)
+@pytest.mark.parametrize("occurrences", ["[2]", "[2, 4]"])
+def test_all_faults_accept_occurrence_schedules(
+    tmp_path: Path, fault_type: str, occurrences: str
+) -> None:
+    content = scenario_for_fault_type(fault_type).replace(
+        "occurrence: 2", f"occurrences: {occurrences}"
+    )
+
+    scenario = load_scenario(write_scenario(tmp_path, content))
+
+    assert scenario.fault is not None
+    assert scenario.fault.trigger.schedule == tuple(
+        int(value) for value in occurrences[1:-1].split(", ")
+    )
+
+
+@pytest.mark.parametrize(
+    "trigger",
+    [
+        "{}",
+        "{occurrence: 2, occurrences: [2, 4]}",
+        "{occurrences: []}",
+        "{occurrences: [2, 2]}",
+        "{occurrences: [4, 2]}",
+        "{occurrences: [0, 2]}",
+        "{occurrences: [-1, 2]}",
+        "{occurrences: [true, 2]}",
+        "{occurrences: [1.5, 2]}",
+        "{occurrence: true}",
+        "{occurrence: 2.0}",
+        "{occurrences: [2], unknown: 3}",
+    ],
+)
+def test_occurrence_trigger_rejects_invalid_forms(tmp_path: Path, trigger: str) -> None:
+    invalid = VALID_SCENARIO.replace("trigger:\n    occurrence: 2", f"trigger: {trigger}")
+
+    with pytest.raises(ScenarioLoadError):
+        load_scenario(write_scenario(tmp_path, invalid))
 
 
 @pytest.mark.parametrize("retry_after_seconds", [0, 1, 86400])
@@ -210,3 +272,23 @@ def test_invalid_fault_union_fails(tmp_path: Path) -> None:
 def test_non_mapping_yaml_fails(tmp_path: Path) -> None:
     with pytest.raises(ScenarioLoadError, match="YAML mapping"):
         load_scenario(write_scenario(tmp_path, "- not\n- a\n- mapping\n"))
+
+
+def test_non_utf8_scenario_is_a_safe_load_error(tmp_path: Path) -> None:
+    path = tmp_path / "scenario.yaml"
+    path.write_bytes(b"\xff\xfe")
+
+    with pytest.raises(ScenarioLoadError, match="UTF-8") as raised:
+        load_scenario(path)
+
+    assert "\\xff" not in str(raised.value)
+
+
+def test_yaml_scalar_conversion_value_error_is_normalized(tmp_path: Path) -> None:
+    oversized_integer = "9" * 5_000
+    path = write_scenario(tmp_path, f"schema_version: {oversized_integer}\n")
+
+    with pytest.raises(ScenarioLoadError, match="invalid YAML value") as raised:
+        load_scenario(path)
+
+    assert oversized_integer not in str(raised.value)

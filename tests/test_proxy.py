@@ -22,7 +22,11 @@ from agentchaos.config.models import (
     HttpRateLimitFault,
     Scenario,
 )
-from agentchaos.events.models import EventType, WorkloadCompletedPayload
+from agentchaos.events.models import (
+    EventType,
+    OperationSucceededPayload,
+    WorkloadCompletedPayload,
+)
 from agentchaos.events.recorder import EventRecorder
 from agentchaos.proxy import server as proxy_module
 from agentchaos.proxy.protocol import AgentChaosH11Protocol
@@ -62,9 +66,16 @@ async def large_response(request: Request) -> JSONResponse:
     return JSONResponse({"value": "12345"})
 
 
+async def slow_response(request: Request) -> JSONResponse:
+    UPSTREAM_PATHS.append(request.url.path)
+    await asyncio.sleep(0.1)
+    return JSONResponse({"path": request.url.path})
+
+
 UPSTREAM = Starlette(
     routes=[
         Route("/large", large_response),
+        Route("/slow", slow_response),
         Route("/{path:path}", echo, methods=["GET", "POST"]),
     ]
 )
@@ -145,6 +156,138 @@ async def test_proxy_forwards_and_injects_http_error(tmp_path: Path) -> None:
         "fingerprint": failed.fingerprint,
         "attempt": 2,
     }
+
+
+@pytest.mark.asyncio
+async def test_proxy_injects_every_scheduled_occurrence(tmp_path: Path) -> None:
+    fault = HttpErrorFault.model_validate(
+        {
+            "type": "http_error",
+            "target": {"method": "GET", "path": "/customer/*"},
+            "trigger": {"occurrences": [2, 4]},
+            "status_code": 503,
+        }
+    )
+    UPSTREAM_PATHS.clear()
+
+    async with running_proxy(tmp_path, fault) as (proxy, recorder):
+        assert proxy.proxy_url is not None
+        async with httpx.AsyncClient(base_url=proxy.proxy_url, trust_env=False) as client:
+            responses = [await client.get("/customer/123") for _ in range(5)]
+
+    assert [response.status_code for response in responses] == [200, 503, 200, 503, 200]
+    assert UPSTREAM_PATHS == ["/customer/123"] * 3
+    injected = [event for event in recorder.events if event.event_type == EventType.FAULT_INJECTED]
+    retries = [event for event in recorder.events if event.event_type == EventType.RETRY_OBSERVED]
+    assert len(injected) == 2
+    assert [event.payload.retry_of_operation_id for event in retries] == [
+        injected[0].payload.operation_id,
+        injected[1].payload.operation_id,
+    ]
+    assert proxy.trigger is not None
+    assert proxy.trigger.completed_occurrences == (2, 4)
+
+
+@pytest.mark.asyncio
+async def test_adjacent_injections_use_fifo_recovery_links(tmp_path: Path) -> None:
+    fault = HttpErrorFault.model_validate(
+        {
+            "type": "http_error",
+            "target": {"method": "GET", "path": "/customer/*"},
+            "trigger": {"occurrences": [2, 3]},
+            "status_code": 503,
+        }
+    )
+
+    async with running_proxy(tmp_path, fault) as (proxy, recorder):
+        assert proxy.proxy_url is not None
+        async with httpx.AsyncClient(base_url=proxy.proxy_url, trust_env=False) as client:
+            responses = [await client.get("/customer/123") for _ in range(5)]
+
+    assert [response.status_code for response in responses] == [200, 503, 503, 200, 200]
+    injected = [event for event in recorder.events if event.event_type == EventType.FAULT_INJECTED]
+    retries = [event for event in recorder.events if event.event_type == EventType.RETRY_OBSERVED]
+    assert [event.payload.retry_of_operation_id for event in retries] == [
+        injected[0].payload.operation_id,
+        injected[0].payload.operation_id,
+        injected[1].payload.operation_id,
+    ]
+    assert [event.payload.attempt for event in retries] == [2, 3, 2]
+
+
+@pytest.mark.asyncio
+async def test_recovery_queues_are_independent_per_fingerprint(tmp_path: Path) -> None:
+    fault = HttpErrorFault.model_validate(
+        {
+            "type": "http_error",
+            "target": {"method": "GET", "path": "/customer/*"},
+            "trigger": {"occurrences": [1, 2]},
+            "status_code": 503,
+        }
+    )
+
+    async with running_proxy(tmp_path, fault) as (proxy, recorder):
+        assert proxy.proxy_url is not None
+        async with httpx.AsyncClient(base_url=proxy.proxy_url, trust_env=False) as client:
+            responses = [
+                await client.get("/customer/123?key=one"),
+                await client.get("/customer/123?key=two"),
+                await client.get("/customer/123?key=two"),
+                await client.get("/customer/123?key=one"),
+            ]
+
+    assert [response.status_code for response in responses] == [503, 503, 200, 200]
+    injected = [event for event in recorder.events if event.event_type == EventType.FAULT_INJECTED]
+    retries = [event for event in recorder.events if event.event_type == EventType.RETRY_OBSERVED]
+    assert [event.payload.retry_of_operation_id for event in retries] == [
+        injected[1].payload.operation_id,
+        injected[0].payload.operation_id,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_selection_follows_operation_observed_sequence(tmp_path: Path) -> None:
+    fault = HttpErrorFault.model_validate(
+        {
+            "type": "http_error",
+            "target": {"method": "GET", "path": "/concurrent"},
+            "trigger": {"occurrences": [3, 7, 11]},
+            "status_code": 503,
+        }
+    )
+    recorder = EventRecorder(tmp_path / "events.jsonl", "run")
+    proxy = ChaosProxy("http://upstream", fault, recorder)
+    fingerprint = proxy._fingerprint("GET", "/concurrent", "query", "body")
+    try:
+        await asyncio.gather(
+            *(
+                proxy._begin_operation(
+                    operation_id=f"operation-{index}",
+                    method="GET",
+                    path="/concurrent",
+                    query_hash="query",
+                    body_hash="body",
+                    fingerprint=fingerprint,
+                    can_inject=True,
+                )
+                for index in range(20)
+            )
+        )
+    finally:
+        await proxy._client.aclose()
+        recorder.close()
+
+    observed_ids = [
+        event.payload.operation_id
+        for event in recorder.events
+        if event.event_type == EventType.OPERATION_OBSERVED
+    ]
+    injected_ids = [
+        event.payload.operation_id
+        for event in recorder.events
+        if event.event_type == EventType.FAULT_INJECTED
+    ]
+    assert injected_ids == [observed_ids[2], observed_ids[6], observed_ids[10]]
 
 
 @pytest.mark.asyncio
@@ -492,6 +635,94 @@ async def test_latency_retry_preserves_inferred_timeout_event_order(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_latency_forwarding_cannot_be_reclassified_as_a_failure(tmp_path: Path) -> None:
+    fault = HttpLatencyFault.model_validate(
+        {
+            "type": "http_latency",
+            "target": {"path": "/slow"},
+            "trigger": {"occurrence": 1},
+            "latency_ms": 10,
+        }
+    )
+    UPSTREAM_PATHS.clear()
+
+    async with running_proxy(tmp_path, fault) as (proxy, recorder):
+        assert proxy.proxy_url is not None
+        async with httpx.AsyncClient(base_url=proxy.proxy_url, trust_env=False) as client:
+            first_task = asyncio.create_task(client.get("/slow"))
+            for _ in range(100):
+                if UPSTREAM_PATHS:
+                    break
+                await asyncio.sleep(0.002)
+            assert UPSTREAM_PATHS == ["/slow"]
+            second = await client.get("/slow")
+            first = await first_task
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert UPSTREAM_PATHS == ["/slow", "/slow"]
+    failures = {
+        event.payload.operation_id
+        for event in recorder.events
+        if event.event_type == EventType.OPERATION_FAILED
+    }
+    successes = {
+        event.payload.operation_id
+        for event in recorder.events
+        if event.event_type == EventType.OPERATION_SUCCEEDED
+    }
+    assert failures == set()
+    assert len(successes) == 2
+    assert not any(event.event_type == EventType.RETRY_OBSERVED for event in recorder.events)
+
+
+@pytest.mark.asyncio
+async def test_recovery_fifo_follows_failure_event_order(tmp_path: Path) -> None:
+    fault = HttpLatencyFault.model_validate(
+        {
+            "type": "http_latency",
+            "target": {"path": "/customer/*"},
+            "trigger": {"occurrences": [1, 2]},
+            "latency_ms": 10,
+        }
+    )
+    recorder = EventRecorder(tmp_path / "events.jsonl", "run")
+    proxy = ChaosProxy("http://upstream", fault, recorder)
+    try:
+        first = await proxy._register_fault_operation("injected-first", "fingerprint")
+        second = await proxy._register_fault_operation("injected-second", "fingerprint")
+        await proxy._emit_failure(second, "client_timeout_inferred", None)
+        await proxy._emit_failure(first, "client_timeout_inferred", None)
+
+        first_retry = await proxy._register_retry("retry-one", "fingerprint")
+        assert first_retry is second
+        await proxy._emit_success(
+            OperationSucceededPayload(
+                operation_id="retry-one",
+                fingerprint="fingerprint",
+                status_code=200,
+                duration_ms=1,
+                fault_related=True,
+            ),
+            fault_state=None,
+            retry_state=first_retry,
+        )
+        second_retry = await proxy._register_retry("retry-two", "fingerprint")
+        assert second_retry is first
+    finally:
+        await proxy._client.aclose()
+        recorder.close()
+
+    retries = [
+        event.payload for event in recorder.events if event.event_type == EventType.RETRY_OBSERVED
+    ]
+    assert [payload.retry_of_operation_id for payload in retries] == [
+        "injected-second",
+        "injected-first",
+    ]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "fault_type",
     [
@@ -502,13 +733,13 @@ async def test_latency_retry_preserves_inferred_timeout_event_order(tmp_path: Pa
         "http_disconnect",
     ],
 )
-async def test_fault_injection_fires_once_under_concurrency(
+async def test_fault_schedule_fires_exactly_under_concurrency(
     tmp_path: Path, fault_type: str
 ) -> None:
     fault_data = {
         "type": fault_type,
         "target": {"path": "/concurrent"},
-        "trigger": {"occurrence": 5},
+        "trigger": {"occurrences": [5, 10]},
     }
     fault: FaultConfig
     if fault_type == "http_latency":
@@ -534,30 +765,48 @@ async def test_fault_injection_fires_once_under_concurrency(
     responses = [result for result in results if isinstance(result, httpx.Response)]
     errors = [result for result in results if isinstance(result, BaseException)]
     injected = [event for event in recorder.events if event.event_type == EventType.FAULT_INJECTED]
-    assert len(injected) == 1
-    assert injected[0].payload.fault_type == fault_type
+    failures = [
+        event
+        for event in recorder.events
+        if event.event_type == EventType.OPERATION_FAILED and event.payload.fault_related
+    ]
+    assert len(injected) == 2
+    assert all(event.payload.fault_type == fault_type for event in injected)
     assert proxy.trigger is not None
     assert proxy.trigger.count == 20
     assert proxy.trigger.fired is True
+    assert proxy.trigger.completed_occurrences == (5, 10)
+    assert proxy.trigger.complete is True
+    expected_failure_kind = {
+        "http_error": "injected_http_error",
+        "http_rate_limit": "injected_rate_limit",
+        "http_malformed_json": "injected_malformed_json",
+        "http_disconnect": "injected_disconnect",
+    }.get(fault_type)
+    if expected_failure_kind is not None:
+        assert [event.payload.failure_kind for event in failures] == [
+            expected_failure_kind,
+            expected_failure_kind,
+        ]
     if fault_type == "http_disconnect":
-        assert len(responses) == 19
-        assert len(errors) == 1
-        assert isinstance(errors[0], httpx.TransportError)
+        assert len(responses) == 18
+        assert len(errors) == 2
+        assert all(isinstance(error, httpx.TransportError) for error in errors)
         assert all(response.status_code == 200 for response in responses)
-        assert UPSTREAM_PATHS == ["/concurrent"] * 19
+        assert UPSTREAM_PATHS == ["/concurrent"] * 18
     else:
         assert errors == []
     if fault_type == "http_error":
-        assert sum(response.status_code == 503 for response in responses) == 1
+        assert sum(response.status_code == 503 for response in responses) == 2
     elif fault_type == "http_rate_limit":
-        assert sum(response.status_code == 429 for response in responses) == 1
+        assert sum(response.status_code == 429 for response in responses) == 2
     elif fault_type == "http_malformed_json":
         assert (
             sum(
                 response.headers.get("x-agent-chaos-fault") == "http_malformed_json"
                 for response in responses
             )
-            == 1
+            == 2
         )
 
 

@@ -1,8 +1,9 @@
 from collections.abc import Iterable
+from unittest.mock import patch
 
 import pytest
 
-from agentchaos.analysis.analyzer import ExperimentResult, analyze
+from agentchaos.analysis.analyzer import AnalysisResult, ExperimentResult, analyze
 from agentchaos.config.models import Scenario
 from agentchaos.events.models import (
     Event,
@@ -69,6 +70,14 @@ def events(payloads: Iterable[EventPayload]) -> tuple[Event, ...]:
     )
 
 
+def analyze_schedule(schedule: tuple[int, ...], payloads: Iterable[EventPayload]) -> AnalysisResult:
+    with patch(
+        "agentchaos.analysis.analyzer._configured_schedule",
+        return_value=schedule,
+    ):
+        return analyze(scenario(), events(payloads))
+
+
 @pytest.mark.parametrize(
     ("configured_fault", "payloads", "expected_result", "reason"),
     [
@@ -81,6 +90,12 @@ def events(payloads: Iterable[EventPayload]) -> tuple[Event, ...]:
             ],
             ExperimentResult.PASSED,
             "BASELINE_SUCCEEDED",
+        ),
+        (
+            True,
+            [],
+            ExperimentResult.FAILED,
+            "WORKLOAD_NOT_COMPLETED",
         ),
         (
             True,
@@ -418,3 +433,426 @@ def test_malformed_json_recovery_requires_a_successful_linked_retry(
 
     assert result.result == expected_result
     assert result.reason_code == reason_code
+
+
+def test_plural_recovery_evidence_is_ordered_and_complete() -> None:
+    result = analyze_schedule(
+        (2, 4),
+        [
+            FaultInjectedPayload(
+                operation_id="failed-one",
+                fault_type="http_error",
+                parameters={"status_code": 503},
+            ),
+            OperationFailedPayload(
+                operation_id="failed-one",
+                fingerprint="fingerprint",
+                failure_kind="injected_http_error",
+                status_code=503,
+                fault_related=True,
+            ),
+            RetryObservedPayload(
+                operation_id="retry-one",
+                retry_of_operation_id="failed-one",
+                fingerprint="fingerprint",
+                attempt=2,
+            ),
+            OperationSucceededPayload(
+                operation_id="retry-one",
+                fingerprint="fingerprint",
+                status_code=200,
+                duration_ms=1,
+                fault_related=True,
+            ),
+            FaultInjectedPayload(
+                operation_id="failed-two",
+                fault_type="http_error",
+                parameters={"status_code": 503},
+            ),
+            OperationFailedPayload(
+                operation_id="failed-two",
+                fingerprint="fingerprint",
+                failure_kind="injected_http_error",
+                status_code=503,
+                fault_related=True,
+            ),
+            RetryObservedPayload(
+                operation_id="retry-two",
+                retry_of_operation_id="failed-two",
+                fingerprint="fingerprint",
+                attempt=2,
+            ),
+            OperationSucceededPayload(
+                operation_id="retry-two",
+                fingerprint="fingerprint",
+                status_code=200,
+                duration_ms=1,
+                fault_related=True,
+            ),
+            WorkloadCompletedPayload(
+                exit_code=0,
+                timed_out=False,
+                interrupted=False,
+                duration_ms=1,
+            ),
+        ],
+    )
+
+    assert result.result == ExperimentResult.RECOVERED
+    assert result.reason_code == "RECOVERY_OBSERVED"
+    assert result.scheduled_occurrences == (2, 4)
+    assert result.completed_occurrences == (2, 4)
+    assert result.recoveries_required == 2
+    assert result.recoveries_successful == 2
+    assert [row.failed_operation_id for row in result.recovery_evidence] == [
+        "failed-one",
+        "failed-two",
+    ]
+    assert [row.retry_operation_id for row in result.recovery_evidence] == [
+        "retry-one",
+        "retry-two",
+    ]
+    assert [row.recovery_latency_ms for row in result.recovery_evidence] == [20, 20]
+
+
+def test_complete_schedule_with_partial_recovery_fails_with_counts() -> None:
+    result = analyze_schedule(
+        (2, 4),
+        [
+            FaultInjectedPayload(
+                operation_id="failed-one",
+                fault_type="http_error",
+                parameters={"status_code": 503},
+            ),
+            OperationFailedPayload(
+                operation_id="failed-one",
+                fingerprint="fingerprint",
+                failure_kind="injected_http_error",
+                status_code=503,
+                fault_related=True,
+            ),
+            RetryObservedPayload(
+                operation_id="retry-one",
+                retry_of_operation_id="failed-one",
+                fingerprint="fingerprint",
+                attempt=2,
+            ),
+            OperationSucceededPayload(
+                operation_id="retry-one",
+                fingerprint="fingerprint",
+                status_code=200,
+                duration_ms=1,
+                fault_related=True,
+            ),
+            FaultInjectedPayload(
+                operation_id="failed-two",
+                fault_type="http_error",
+                parameters={"status_code": 503},
+            ),
+            OperationFailedPayload(
+                operation_id="failed-two",
+                fingerprint="fingerprint",
+                failure_kind="injected_http_error",
+                status_code=503,
+                fault_related=True,
+            ),
+            WorkloadCompletedPayload(
+                exit_code=0,
+                timed_out=False,
+                interrupted=False,
+                duration_ms=1,
+            ),
+        ],
+    )
+
+    assert result.result == ExperimentResult.FAILED
+    assert result.reason_code == "RECOVERY_NOT_OBSERVED"
+    assert result.recoveries_required == 2
+    assert result.recoveries_successful == 1
+    assert result.diagnostics == (
+        "2 recoveries were required, but 1 successful recoveries were observed",
+    )
+
+
+def test_mixed_tolerated_and_recovered_injections_are_recovered() -> None:
+    result = analyze_schedule(
+        (2, 4),
+        [
+            FaultInjectedPayload(
+                operation_id="tolerated",
+                fault_type="http_latency",
+                parameters={"latency_ms": 10},
+            ),
+            OperationSucceededPayload(
+                operation_id="tolerated",
+                fingerprint="tolerated-fingerprint",
+                status_code=200,
+                duration_ms=10,
+                fault_related=True,
+            ),
+            FaultInjectedPayload(
+                operation_id="failed",
+                fault_type="http_latency",
+                parameters={"latency_ms": 10},
+            ),
+            OperationFailedPayload(
+                operation_id="failed",
+                fingerprint="failed-fingerprint",
+                failure_kind="client_timeout_inferred",
+                fault_related=True,
+            ),
+            RetryObservedPayload(
+                operation_id="retry",
+                retry_of_operation_id="failed",
+                fingerprint="failed-fingerprint",
+                attempt=2,
+            ),
+            OperationSucceededPayload(
+                operation_id="retry",
+                fingerprint="failed-fingerprint",
+                status_code=200,
+                duration_ms=1,
+                fault_related=True,
+            ),
+            WorkloadCompletedPayload(
+                exit_code=0,
+                timed_out=False,
+                interrupted=False,
+                duration_ms=1,
+            ),
+        ],
+    )
+
+    assert result.result == ExperimentResult.RECOVERED
+    assert result.reason_code == "RECOVERY_OBSERVED"
+    assert result.recoveries_required == 1
+    assert result.recoveries_successful == 1
+
+
+def test_partial_schedule_precedes_successful_recovery() -> None:
+    result = analyze_schedule(
+        (2, 4),
+        [
+            FaultInjectedPayload(
+                operation_id="failed",
+                fault_type="http_error",
+                parameters={"status_code": 503},
+            ),
+            OperationFailedPayload(
+                operation_id="failed",
+                fingerprint="fingerprint",
+                failure_kind="injected_http_error",
+                status_code=503,
+                fault_related=True,
+            ),
+            RetryObservedPayload(
+                operation_id="retry",
+                retry_of_operation_id="failed",
+                fingerprint="fingerprint",
+                attempt=2,
+            ),
+            OperationSucceededPayload(
+                operation_id="retry",
+                fingerprint="fingerprint",
+                status_code=200,
+                duration_ms=1,
+                fault_related=True,
+            ),
+            WorkloadCompletedPayload(
+                exit_code=0,
+                timed_out=False,
+                interrupted=False,
+                duration_ms=1,
+            ),
+        ],
+    )
+
+    assert result.result == ExperimentResult.FAILED
+    assert result.reason_code == "FAULT_SCHEDULE_INCOMPLETE"
+    assert result.completed_occurrences == (2,)
+    assert result.recoveries_successful == 1
+    assert result.diagnostics == (
+        "the fault schedule configured 2 injections, but only 1 completed",
+    )
+
+
+def test_over_injection_is_an_internal_error() -> None:
+    result = analyze_schedule(
+        (2, 4),
+        [
+            FaultInjectedPayload(
+                operation_id=f"operation-{index}",
+                fault_type="http_latency",
+                parameters={"latency_ms": 10},
+            )
+            for index in range(3)
+        ]
+        + [
+            WorkloadCompletedPayload(
+                exit_code=0,
+                timed_out=False,
+                interrupted=False,
+                duration_ms=1,
+            )
+        ],
+    )
+
+    assert result.result == ExperimentResult.FAILED
+    assert result.reason_code == "INTERNAL_ERROR"
+    assert result.completed_occurrences == (2, 4)
+
+
+def test_duplicate_injection_operation_is_an_internal_error() -> None:
+    result = analyze_schedule(
+        (2, 4),
+        [
+            FaultInjectedPayload(
+                operation_id="duplicate-operation",
+                fault_type="http_latency",
+                parameters={"latency_ms": 10},
+            ),
+            FaultInjectedPayload(
+                operation_id="duplicate-operation",
+                fault_type="http_latency",
+                parameters={"latency_ms": 10},
+            ),
+            WorkloadCompletedPayload(
+                exit_code=0,
+                timed_out=False,
+                interrupted=False,
+                duration_ms=1,
+            ),
+        ],
+    )
+
+    assert result.result == ExperimentResult.FAILED
+    assert result.reason_code == "INTERNAL_ERROR"
+    assert result.diagnostics == (
+        "duplicate fault injection evidence was recorded for one operation",
+    )
+
+
+@pytest.mark.parametrize(
+    ("retry_fingerprint", "success_fingerprint", "success_status"),
+    [
+        ("different", "fingerprint", 200),
+        ("fingerprint", "different", 200),
+        ("fingerprint", "fingerprint", 500),
+    ],
+)
+def test_recovery_requires_matching_fingerprints_and_success_status(
+    retry_fingerprint: str,
+    success_fingerprint: str,
+    success_status: int,
+) -> None:
+    result = analyze_schedule(
+        (1,),
+        [
+            FaultInjectedPayload(
+                operation_id="failed",
+                fault_type="http_error",
+                parameters={"status_code": 503},
+            ),
+            OperationFailedPayload(
+                operation_id="failed",
+                fingerprint="fingerprint",
+                failure_kind="injected_http_error",
+                status_code=503,
+                fault_related=True,
+            ),
+            RetryObservedPayload(
+                operation_id="retry",
+                retry_of_operation_id="failed",
+                fingerprint=retry_fingerprint,
+                attempt=2,
+            ),
+            OperationSucceededPayload(
+                operation_id="retry",
+                fingerprint=success_fingerprint,
+                status_code=success_status,
+                duration_ms=1,
+                fault_related=True,
+            ),
+            WorkloadCompletedPayload(
+                exit_code=0,
+                timed_out=False,
+                interrupted=False,
+                duration_ms=1,
+            ),
+        ],
+    )
+
+    assert result.result == ExperimentResult.FAILED
+    assert result.reason_code == "RECOVERY_NOT_OBSERVED"
+    assert result.recoveries_successful == 0
+
+
+def test_analysis_uses_recorder_sequence_not_input_tuple_order() -> None:
+    ordered = events(
+        [
+            FaultInjectedPayload(
+                operation_id="failed-one",
+                fault_type="http_error",
+                parameters={"status_code": 503},
+            ),
+            OperationFailedPayload(
+                operation_id="failed-one",
+                fingerprint="one",
+                failure_kind="injected_http_error",
+                status_code=503,
+                fault_related=True,
+            ),
+            FaultInjectedPayload(
+                operation_id="failed-two",
+                fault_type="http_error",
+                parameters={"status_code": 503},
+            ),
+            OperationFailedPayload(
+                operation_id="failed-two",
+                fingerprint="two",
+                failure_kind="injected_http_error",
+                status_code=503,
+                fault_related=True,
+            ),
+            WorkloadCompletedPayload(
+                exit_code=0,
+                timed_out=False,
+                interrupted=False,
+                duration_ms=1,
+            ),
+        ]
+    )
+
+    with patch("agentchaos.analysis.analyzer._configured_schedule", return_value=(2, 4)):
+        result = analyze(scenario(), tuple(reversed(ordered)))
+
+    assert [row.failed_operation_id for row in result.recovery_evidence] == [
+        "failed-one",
+        "failed-two",
+    ]
+    assert result.duration_ms == ordered[-1].elapsed_ms
+
+
+def test_duplicate_event_sequence_is_an_internal_error() -> None:
+    recorded = events(
+        [
+            FaultInjectedPayload(
+                operation_id="operation",
+                fault_type="http_error",
+                parameters={"status_code": 503},
+            ),
+            WorkloadCompletedPayload(
+                exit_code=0,
+                timed_out=False,
+                interrupted=False,
+                duration_ms=1,
+            ),
+        ]
+    )
+    duplicated = (recorded[0], recorded[1].model_copy(update={"sequence": 1}))
+
+    result = analyze(scenario(), duplicated)
+
+    assert result.result == ExperimentResult.FAILED
+    assert result.reason_code == "INTERNAL_ERROR"
+    assert result.diagnostics == ("duplicate event sequence numbers were recorded",)

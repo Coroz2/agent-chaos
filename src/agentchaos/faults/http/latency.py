@@ -38,7 +38,11 @@ class HttpLatencyExecutor:
         for task in pending:
             task.cancel()
         await asyncio.gather(*pending, return_exceptions=True)
-        abandoned = retry_task in done or await context.is_disconnected()
+        abandoned = retry_task in done
+        if not abandoned:
+            abandoned = not await context.begin_forwarding()
+        if not abandoned:
+            abandoned = await context.is_disconnected()
         if abandoned:
             return HttpFaultOutcome(
                 action=HttpFaultAction.ABANDON,

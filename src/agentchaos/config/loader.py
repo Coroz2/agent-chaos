@@ -17,6 +17,11 @@ def load_scenario(path: Path) -> Scenario:
     """Load and validate a scenario YAML file."""
     try:
         raw: Any = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except UnicodeDecodeError as error:
+        raise ScenarioLoadError("scenario must be UTF-8 text") from error
+    except ValueError as error:
+        # Some scalar conversions escape PyYAML as plain ValueError.
+        raise ScenarioLoadError("scenario contains an invalid YAML value") from error
     except (OSError, yaml.YAMLError) as error:
         raise ScenarioLoadError(str(error)) from error
 
