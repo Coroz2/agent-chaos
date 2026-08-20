@@ -7,6 +7,7 @@ This directory separates stable project direction from released behavior and his
 | Document | Authority |
 | --- | --- |
 | [Project Vision](PROJECT-VISION.md) | Stable mission, audience, principles, capability families, and product boundaries. |
+| [v0.5 Specification](specs/v0.5.md) | Approved contract for the next v0.5 release; not yet released. |
 | [v0.4 Specification](specs/v0.4.md) | Authoritative contract for the current released v0.4 behavior. |
 | [v0.3 Specification](specs/v0.3.md) | Immutable contract for the released v0.3 behavior. |
 | [v0.2 Specification](specs/v0.2.md) | Immutable contract for the released v0.2 behavior. |
