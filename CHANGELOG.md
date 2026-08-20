@@ -7,6 +7,14 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Reproducible seeded probability triggers over finite matching-request occurrence windows.
+- Schema-3 reports with generalized occurrence-schedule or probability-window trigger evidence,
+  plus read-only inspection compatibility for schema-1, schema-2, and schema-3 reports.
+- Managed offline examples for complete probability-window recovery and recovered partial-window
+  failure.
+
 ## [0.4.0] - 2026-08-19
 
 ### Added

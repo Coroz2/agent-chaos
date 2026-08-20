@@ -52,14 +52,17 @@ uv run agentchaos run examples/scenarios/api_429_failure.yaml
 uv run agentchaos run examples/scenarios/api_503_failure.yaml
 uv run agentchaos run examples/scenarios/api_503_schedule_recovery.yaml
 uv run agentchaos run examples/scenarios/api_503_schedule_incomplete.yaml
+uv run agentchaos run examples/scenarios/api_503_probability_recovery.yaml
+uv run agentchaos run examples/scenarios/api_503_probability_incomplete.yaml
 uv run agentchaos run examples/scenarios/http_disconnect_recovery.yaml
 uv run agentchaos run examples/scenarios/http_disconnect_failure.yaml
 uv run agentchaos run examples/scenarios/http_malformed_json_recovery.yaml
 uv run agentchaos run examples/scenarios/http_malformed_json_failure.yaml
 ```
 
-The 429, 503, disconnect, malformed-JSON, and incomplete-schedule examples deliberately exit with
-status 1 because the experiment's required recovery or schedule completion is not observed.
+The 429, 503, disconnect, malformed-JSON, incomplete-schedule, and incomplete-window examples
+deliberately exit with status 1 because the experiment's required recovery or trigger completion is
+not observed.
 
 ## Scenario
 
@@ -169,6 +172,30 @@ toward the schedule and can themselves be selected for injection. A schedule is 
 when every configured occurrence injects; reaching only part of it fails with
 `FAULT_SCHEDULE_INCOMPLETE` even if every observed failure recovered.
 
+To select faults reproducibly from a finite matching-request window, configure a probability and
+required seed:
+
+```yaml
+fault:
+  type: http_error
+  target:
+    method: GET
+    path: /customer/*
+  trigger:
+    probability: 0.5
+    seed: 10
+    window:
+      start_occurrence: 1
+      end_occurrence: 5
+  status_code: 503
+```
+
+The bounds are inclusive occurrence ordinals. Probability supports up to six decimal places, the
+seed is an unsigned 64-bit integer, and retries participate in counting. Selection uses a published
+SHA-256 algorithm, so the same scenario and matching-request order select the same operations on
+every supported platform. A window that starts but does not finish fails with
+`TRIGGER_WINDOW_INCOMPLETE`, even when every observed failure recovered.
+
 ## Results
 
 - `PASSED`: a baseline succeeds, or the workload tolerates injected latency without failure.
@@ -198,10 +225,11 @@ Every valid run contains:
 └── report.json
 ```
 
-`events.jsonl` remains a schema-1, sequence-ordered event stream. New runs write schema-2
-`report.json` files with the configured and completed occurrence schedules plus one evidence row
-per fault-related failed operation. Each row identifies its successful retry and recovery latency,
-or uses null values when recovery was not observed.
+`events.jsonl` remains a schema-1, sequence-ordered event stream. New runs write schema-3
+`report.json` files with a generalized occurrence-schedule or seeded-probability trigger object plus
+one evidence row per fault-related failed operation. Probability reports include the seed, window,
+evaluation count, and selected occurrence ordinals. Each recovery row identifies its successful
+retry and latency, or uses null values when recovery was not observed.
 
 ## Commands
 
@@ -218,7 +246,7 @@ uv run agentchaos inspect .agentchaos/runs/<run-id>/report.json
 Use `--output-dir PATH` to place run directories somewhere other than `.agentchaos/runs`.
 
 `inspect` accepts either a run directory or its `report.json` file and prints the same result
-summary as `run`. It strictly validates schema-1 and schema-2 saved reports without running a
+summary as `run`. It strictly validates schema-1, schema-2, and schema-3 saved reports without running a
 workload, starting a dependency, contacting the network, reading other artifacts, migrating the
 report, or modifying the run directory.
 
@@ -228,6 +256,7 @@ report, or modifying the run directory.
   boundaries.
 - [Documentation index](docs/README.md): authority map for specifications, release guidance, and
   archived planning.
+- [v0.5 specification](docs/specs/v0.5.md): approved contract for the next release.
 - [v0.4 specification](docs/specs/v0.4.md): complete contract for the current released behavior.
 - [v0.3 specification](docs/specs/v0.3.md): immutable contract for the prior release.
 - [v0.2 specification](docs/specs/v0.2.md): immutable contract for the prior release.
@@ -252,16 +281,16 @@ Agent Chaos supports one HTTP dependency and zero or one fault on macOS and Linu
 proxy, not transparent network interception: the workload must accept the proxy base URL through
 its configuration. Request bodies and responses are buffered up to 10 MiB. Disconnect injection
 does not provide packet-level reset controls or partial-response faults. Streaming, SSE,
-WebSockets, CONNECT tunneling, TLS interception, multiple faults, probabilistic triggers, and
-model-specific grading are not implemented.
+WebSockets, CONNECT tunneling, TLS interception, multiple faults, wall-clock triggers, unbounded
+probabilistic triggers, and model-specific grading are not implemented.
 
 Retry classification uses a deterministic fingerprint of method, path, hashed query, and body.
 It is useful black-box evidence, not proof of the workload's internal intent.
 
 ## Roadmap
 
-The next logical steps include trigger windows and reproducible probabilistic policies,
-multi-fault campaigns, then another dependency adapter such as MCP. These are broad, nonbinding
-directions; detailed release scope begins only in an approved version specification.
+After the approved v0.5 probability-window work, the next logical steps are multi-fault campaigns,
+then another dependency adapter such as MCP. These are broad, nonbinding directions; detailed
+release scope begins only in an approved version specification.
 
 Licensed under Apache-2.0.

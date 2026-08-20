@@ -9,10 +9,14 @@ from agentchaos.reporting.models import (
     ArtifactReport,
     FaultReport,
     FaultReportV2,
+    FaultReportV3,
+    OccurrenceScheduleTriggerReport,
+    ProbabilityWindowReport,
     RecoveryEvidenceReport,
     RecoveryReport,
     RecoveryReportV2,
     Report,
+    SeededProbabilityTriggerReport,
     TimingReport,
     WorkloadReport,
 )
@@ -274,6 +278,103 @@ def test_schema_two_fault_schedule_is_strict(change: dict[str, object]) -> None:
         validate_json_payload(payload)
 
 
+def test_schema_three_probability_report_round_trips_strictly(tmp_path: Path) -> None:
+    report = schema_three_probability_report()
+    path = tmp_path / "report.json"
+
+    write_report(report, path)
+
+    loaded = Report.model_validate_json(path.read_bytes(), strict=True)
+    assert loaded == report
+    assert loaded.schema_version == 3
+    assert isinstance(loaded.fault, FaultReportV3)
+    assert isinstance(loaded.fault.trigger, SeededProbabilityTriggerReport)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"probability": 0},
+        {"probability": 0.1234567},
+        {"seed": -1},
+        {"evaluated_occurrences": 6},
+        {"selected_occurrences": [1, 2]},
+        {"selected_occurrences": [4, 2]},
+        {"completed": False},
+        {"unknown": True},
+    ],
+)
+def test_schema_three_probability_evidence_is_strict(change: dict[str, object]) -> None:
+    payload = schema_three_probability_report().model_dump(mode="json")
+    payload["fault"]["trigger"] |= change
+
+    with pytest.raises(ValidationError):
+        validate_json_payload(payload)
+
+
+def test_schema_three_rejects_hash_selection_contradiction() -> None:
+    payload = schema_three_probability_report().model_dump(mode="json")
+    payload["fault"]["trigger"]["selected_occurrences"] = [2]
+    payload["faults_injected"] = 1
+
+    with pytest.raises(ValidationError):
+        validate_json_payload(payload)
+
+
+def test_schema_three_preserves_inconsistent_evidence_for_internal_error() -> None:
+    payload = schema_three_probability_report().model_dump(mode="json")
+    payload |= {"result": "FAILED", "reason_code": "INTERNAL_ERROR", "faults_injected": 1}
+    payload["fault"]["trigger"]["selected_occurrences"] = [2]
+    payload["failed_operations"] = 1
+    payload["recovery"] = {
+        "required": 1,
+        "successful": 1,
+        "evidence": [payload["recovery"]["evidence"][0]],
+    }
+
+    report = validate_json_payload(payload)
+
+    assert report.reason_code == "INTERNAL_ERROR"
+
+
+def test_schema_three_preserves_out_of_window_injection_count_for_internal_error() -> None:
+    payload = schema_three_probability_report().model_dump(mode="json")
+    payload |= {"result": "FAILED", "reason_code": "INTERNAL_ERROR", "faults_injected": 1}
+    payload["fault"]["trigger"]["selected_occurrences"] = []
+    payload["failed_operations"] = 1
+    payload["recovery"] = {
+        "required": 1,
+        "successful": 1,
+        "evidence": [payload["recovery"]["evidence"][0]],
+    }
+
+    report = validate_json_payload(payload)
+
+    assert report.faults_injected == 1
+
+
+def test_schema_three_occurrence_schedule_uses_generalized_trigger() -> None:
+    report = schema_three_probability_report().model_copy(
+        update={
+            "fault": FaultReportV3(
+                configured=True,
+                type="http_error",
+                injected=True,
+                trigger=OccurrenceScheduleTriggerReport(
+                    scheduled_occurrences=(2, 4),
+                    completed_occurrences=(2, 4),
+                    completed=True,
+                ),
+            )
+        }
+    )
+
+    loaded = validate_json_payload(report.model_dump(mode="json"))
+
+    assert isinstance(loaded.fault, FaultReportV3)
+    assert isinstance(loaded.fault.trigger, OccurrenceScheduleTriggerReport)
+
+
 def validate_json_payload(payload: dict[str, object]) -> Report:
     return Report.model_validate_json(json.dumps(payload), strict=True)
 
@@ -310,6 +411,66 @@ def schema_two_report() -> Report:
                 RecoveryEvidenceReport(
                     failed_operation_id="failed",
                     retry_operation_id="retry",
+                    recovery_latency_ms=10,
+                ),
+            ),
+        ),
+        timing=TimingReport(started_at="2026-01-01T00:00:00Z", completed_at="2026-01-01T00:00:01Z"),
+        artifacts=ArtifactReport(
+            scenario="scenario.yaml",
+            events="events.jsonl",
+            stdout="stdout.log",
+            stderr="stderr.log",
+            dependency_stdout=None,
+            dependency_stderr=None,
+            report="report.json",
+        ),
+        diagnostics=[],
+    )
+
+
+def schema_three_probability_report() -> Report:
+    return Report(
+        schema_version=3,
+        run_id="run",
+        scenario_name="probability-scenario",
+        result=ExperimentResult.RECOVERED,
+        reason_code="RECOVERY_OBSERVED",
+        duration_ms=20,
+        faults_injected=2,
+        operations_observed=5,
+        successful_operations=3,
+        failed_operations=2,
+        retries_observed=2,
+        workload_exit_code=0,
+        workload=WorkloadReport(
+            name="agent", expected_exit_code=0, exit_code=0, timed_out=False, interrupted=False
+        ),
+        fault=FaultReportV3(
+            configured=True,
+            type="http_error",
+            injected=True,
+            trigger=SeededProbabilityTriggerReport(
+                probability=0.5,
+                seed=10,
+                window=ProbabilityWindowReport(start_occurrence=1, end_occurrence=5),
+                evaluated_occurrences=5,
+                selected_occurrences=(2, 4),
+                completed=True,
+            ),
+        ),
+        recovery=RecoveryReportV2(
+            required=2,
+            successful=2,
+            evidence=(
+                RecoveryEvidenceReport(
+                    failed_operation_id="failed-one",
+                    retry_operation_id="retry-one",
+                    recovery_latency_ms=10,
+                ),
+                RecoveryEvidenceReport(
+                    failed_operation_id="failed-two",
+                    retry_operation_id="retry-two",
                     recovery_latency_ms=10,
                 ),
             ),

@@ -3,19 +3,23 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal
 from enum import StrEnum
+from typing import Literal
 
-from agentchaos.config.models import Scenario
+from agentchaos.config.models import OccurrenceTriggerConfig, ProbabilityTriggerConfig, Scenario
 from agentchaos.events.models import (
     Event,
     EventType,
     FaultInjectedPayload,
     OperationFailedPayload,
+    OperationObservedPayload,
     OperationSucceededPayload,
     RetryObservedPayload,
     RunErrorPayload,
     WorkloadCompletedPayload,
 )
+from agentchaos.faults.trigger import path_matches, probability_selects
 
 
 class ExperimentResult(StrEnum):
@@ -32,6 +36,40 @@ class RecoveryEvidence:
 
 
 @dataclass(frozen=True, slots=True)
+class OccurrenceScheduleEvidence:
+    kind: Literal["occurrence_schedule"]
+    scheduled_occurrences: tuple[int, ...]
+    completed_occurrences: tuple[int, ...]
+
+    @property
+    def completed(self) -> bool:
+        return self.completed_occurrences == self.scheduled_occurrences
+
+
+@dataclass(frozen=True, slots=True)
+class ProbabilityWindowEvidence:
+    kind: Literal["seeded_probability"]
+    probability: Decimal
+    seed: int
+    start_occurrence: int
+    end_occurrence: int
+    evaluated_occurrences: int
+    selected_occurrences: tuple[int, ...]
+    consistent: bool
+
+    @property
+    def window_size(self) -> int:
+        return self.end_occurrence - self.start_occurrence + 1
+
+    @property
+    def completed(self) -> bool:
+        return self.evaluated_occurrences == self.window_size
+
+
+type TriggerEvidence = OccurrenceScheduleEvidence | ProbabilityWindowEvidence
+
+
+@dataclass(frozen=True, slots=True)
 class AnalysisResult:
     result: ExperimentResult
     reason_code: str
@@ -45,9 +83,20 @@ class AnalysisResult:
     workload_exit_code: int | None
     workload_timed_out: bool
     workload_interrupted: bool
-    scheduled_occurrences: tuple[int, ...]
-    completed_occurrences: tuple[int, ...]
+    trigger: TriggerEvidence | None
     recovery_evidence: tuple[RecoveryEvidence, ...]
+
+    @property
+    def scheduled_occurrences(self) -> tuple[int, ...]:
+        if isinstance(self.trigger, OccurrenceScheduleEvidence):
+            return self.trigger.scheduled_occurrences
+        return ()
+
+    @property
+    def completed_occurrences(self) -> tuple[int, ...]:
+        if isinstance(self.trigger, OccurrenceScheduleEvidence):
+            return self.trigger.completed_occurrences
+        return ()
 
     @property
     def recoveries_required(self) -> int:
@@ -114,12 +163,16 @@ def analyze(scenario: Scenario, events: tuple[Event, ...]) -> AnalysisResult:
         for event in by_type[EventType.RETRY_OBSERVED]
         if isinstance(event.payload, RetryObservedPayload)
     ]
+    observed = [
+        (event, event.payload)
+        for event in by_type[EventType.OPERATION_OBSERVED]
+        if isinstance(event.payload, OperationObservedPayload)
+    ]
 
     result = ExperimentResult.FAILED
     reason_code = "INTERNAL_ERROR"
     diagnostics: list[str] = []
-    scheduled_occurrences = _configured_schedule(scenario)
-    completed_occurrences = scheduled_occurrences[: min(len(injected), len(scheduled_occurrences))]
+    trigger_evidence = _build_trigger_evidence(scenario, observed, failures, injected)
     fault_failures = [(event, payload) for event, payload in failures if payload.fault_related]
     recovery_evidence = _build_recovery_evidence(fault_failures, retries, successes)
     recoveries_required = len(recovery_evidence)
@@ -151,23 +204,40 @@ def analyze(scenario: Scenario, events: tuple[Event, ...]) -> AnalysisResult:
     elif scenario.fault is None:
         result = ExperimentResult.PASSED
         reason_code = "BASELINE_SUCCEEDED"
+    elif (
+        isinstance(trigger_evidence, ProbabilityWindowEvidence) and not trigger_evidence.consistent
+    ):
+        reason_code = "INTERNAL_ERROR"
+        diagnostics.append("probability trigger selections contradicted the recorded operations")
     elif not injected:
         reason_code = "FAULT_NOT_TRIGGERED"
-        diagnostics.append("the configured fault occurrence was never reached")
+        diagnostics.append("the configured trigger produced no fault injection")
     elif duplicate_injection:
         reason_code = "INTERNAL_ERROR"
         diagnostics.append("duplicate fault injection evidence was recorded for one operation")
-    elif len(injected) > len(scheduled_occurrences):
+    elif isinstance(trigger_evidence, OccurrenceScheduleEvidence) and len(injected) > len(
+        trigger_evidence.scheduled_occurrences
+    ):
         reason_code = "INTERNAL_ERROR"
         diagnostics.append(
-            f"the fault schedule configured {len(scheduled_occurrences)} injections, "
+            f"the fault schedule configured {len(trigger_evidence.scheduled_occurrences)} "
+            "injections, "
             f"but {len(injected)} were recorded"
         )
-    elif len(injected) < len(scheduled_occurrences):
+    elif (
+        isinstance(trigger_evidence, OccurrenceScheduleEvidence) and not trigger_evidence.completed
+    ):
         reason_code = "FAULT_SCHEDULE_INCOMPLETE"
         diagnostics.append(
-            f"the fault schedule configured {len(scheduled_occurrences)} injections, "
+            f"the fault schedule configured {len(trigger_evidence.scheduled_occurrences)} "
+            "injections, "
             f"but only {len(injected)} completed"
+        )
+    elif isinstance(trigger_evidence, ProbabilityWindowEvidence) and not trigger_evidence.completed:
+        reason_code = "TRIGGER_WINDOW_INCOMPLETE"
+        diagnostics.append(
+            f"the probability window required {trigger_evidence.window_size} evaluations, "
+            f"but only {trigger_evidence.evaluated_occurrences} completed"
         )
     else:
         if not fault_failures:
@@ -197,16 +267,90 @@ def analyze(scenario: Scenario, events: tuple[Event, ...]) -> AnalysisResult:
         workload_exit_code=None if workload_payload is None else workload_payload.exit_code,
         workload_timed_out=False if workload_payload is None else workload_payload.timed_out,
         workload_interrupted=False if workload_payload is None else workload_payload.interrupted,
-        scheduled_occurrences=scheduled_occurrences,
-        completed_occurrences=completed_occurrences,
+        trigger=trigger_evidence,
         recovery_evidence=recovery_evidence,
     )
 
 
 def _configured_schedule(scenario: Scenario) -> tuple[int, ...]:
-    if scenario.fault is None:
+    if scenario.fault is None or not isinstance(scenario.fault.trigger, OccurrenceTriggerConfig):
         return ()
     return scenario.fault.trigger.schedule
+
+
+def _build_trigger_evidence(
+    scenario: Scenario,
+    observed: list[tuple[Event, OperationObservedPayload]],
+    failures: list[tuple[Event, OperationFailedPayload]],
+    injected: list[tuple[Event, FaultInjectedPayload]],
+) -> TriggerEvidence | None:
+    if scenario.fault is None:
+        return None
+    trigger = scenario.fault.trigger
+    if isinstance(trigger, OccurrenceTriggerConfig):
+        schedule = _configured_schedule(scenario)
+        completed = schedule[: min(len(injected), len(schedule))]
+        return OccurrenceScheduleEvidence(
+            kind="occurrence_schedule",
+            scheduled_occurrences=schedule,
+            completed_occurrences=completed,
+        )
+
+    assert isinstance(trigger, ProbabilityTriggerConfig)
+    oversized_ids = {
+        payload.operation_id
+        for _, payload in failures
+        if payload.failure_kind == "request_body_too_large"
+    }
+    target = scenario.fault.target
+    matching = [
+        payload
+        for _, payload in observed
+        if payload.operation_id not in oversized_ids
+        and (target.method is None or payload.method == target.method)
+        and path_matches(target.path, payload.path)
+    ]
+    start = trigger.window.start_occurrence
+    end = trigger.window.end_occurrence
+    evaluated = min(max(len(matching) - start + 1, 0), trigger.window.size)
+    expected_ids: list[str] = []
+    expected_occurrences: list[int] = []
+    for occurrence, payload in enumerate(matching, start=1):
+        if occurrence > end:
+            break
+        if occurrence >= start and probability_selects(
+            trigger.probability, trigger.seed, occurrence
+        ):
+            expected_ids.append(payload.operation_id)
+            expected_occurrences.append(occurrence)
+
+    actual_ids = [payload.operation_id for _, payload in injected]
+    occurrences_by_id = {
+        payload.operation_id: occurrence for occurrence, payload in enumerate(matching, start=1)
+    }
+    evaluated_end = start + evaluated - 1
+    actual_occurrence_list: list[int] = []
+    for operation_id in actual_ids:
+        actual_occurrence = occurrences_by_id.get(operation_id)
+        if (
+            actual_occurrence is not None
+            and start <= actual_occurrence <= evaluated_end
+            and actual_occurrence not in actual_occurrence_list
+        ):
+            actual_occurrence_list.append(actual_occurrence)
+    actual_occurrences = tuple(actual_occurrence_list)
+    return ProbabilityWindowEvidence(
+        kind="seeded_probability",
+        probability=trigger.probability,
+        seed=trigger.seed,
+        start_occurrence=start,
+        end_occurrence=end,
+        evaluated_occurrences=evaluated,
+        selected_occurrences=actual_occurrences,
+        consistent=(
+            actual_ids == expected_ids and actual_occurrences == tuple(expected_occurrences)
+        ),
+    )
 
 
 def _build_recovery_evidence(

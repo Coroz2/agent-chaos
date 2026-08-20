@@ -8,6 +8,11 @@ from agentchaos.analysis.analyzer import ExperimentResult
 from agentchaos.cli import app
 from agentchaos.config.loader import load_scenario
 from agentchaos.config.models import Scenario
+from agentchaos.reporting.models import (
+    FaultReportV3,
+    OccurrenceScheduleTriggerReport,
+    SeededProbabilityTriggerReport,
+)
 from agentchaos.runtime.orchestrator import run_experiment
 
 runner = CliRunner()
@@ -239,10 +244,15 @@ async def test_demo_scenarios_end_to_end(
     assert execution.report.faults_injected == expected_faults
     assert execution.report.failed_operations == expected_failures
     assert execution.report.retries_observed == expected_retries
-    assert execution.report.schema_version == 2
-    assert execution.report.fault.scheduled_occurrences == tuple(expected_schedule)
-    assert execution.report.fault.completed_occurrences == tuple(expected_completed)
-    assert execution.report.fault.schedule_completed == (expected_completed == expected_schedule)
+    assert execution.report.schema_version == 3
+    assert isinstance(execution.report.fault, FaultReportV3)
+    if expected_schedule:
+        assert isinstance(execution.report.fault.trigger, OccurrenceScheduleTriggerReport)
+        assert execution.report.fault.trigger.scheduled_occurrences == tuple(expected_schedule)
+        assert execution.report.fault.trigger.completed_occurrences == tuple(expected_completed)
+        assert execution.report.fault.trigger.completed == (expected_completed == expected_schedule)
+    else:
+        assert execution.report.fault.trigger is None
     assert execution.report.recovery.required == expected_failures
     assert execution.report.recovery.successful == expected_recoveries
     assert len(execution.report.recovery.evidence) == expected_failures
@@ -303,3 +313,62 @@ async def test_demo_scenarios_end_to_end(
         assert "Reason: FAULT_SCHEDULE_INCOMPLETE" in inspection.output
         assert "Faults injected:       1/2" in inspection.output
         assert "Successful recoveries: 1/1" in inspection.output
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("filename", "expected_reason", "expected_exit", "evaluated", "selected", "recoveries"),
+    [
+        (
+            "api_503_probability_recovery.yaml",
+            "RECOVERY_OBSERVED",
+            0,
+            5,
+            (2, 4),
+            2,
+        ),
+        (
+            "api_503_probability_incomplete.yaml",
+            "TRIGGER_WINDOW_INCOMPLETE",
+            1,
+            3,
+            (2,),
+            1,
+        ),
+    ],
+)
+async def test_probability_examples_end_to_end(
+    tmp_path: Path,
+    filename: str,
+    expected_reason: str,
+    expected_exit: int,
+    evaluated: int,
+    selected: tuple[int, ...],
+    recoveries: int,
+) -> None:
+    scenario_path = Path("examples/scenarios") / filename
+
+    execution = await run_experiment(
+        load_scenario(scenario_path),
+        scenario_path.resolve(),
+        tmp_path / "runs",
+        stream_output=False,
+    )
+
+    assert execution.report.reason_code == expected_reason
+    assert execution.exit_code == expected_exit
+    assert execution.report.schema_version == 3
+    assert isinstance(execution.report.fault, FaultReportV3)
+    assert isinstance(execution.report.fault.trigger, SeededProbabilityTriggerReport)
+    assert execution.report.fault.trigger.evaluated_occurrences == evaluated
+    assert execution.report.fault.trigger.selected_occurrences == selected
+    assert execution.report.fault.trigger.completed is (evaluated == 5)
+    assert execution.report.faults_injected == len(selected)
+    assert execution.report.recovery.required == len(selected)
+    assert execution.report.recovery.successful == recoveries
+
+    inspection = runner.invoke(app, ["inspect", str(execution.run_dir)])
+    assert inspection.exit_code == 0
+    assert f"Reason: {expected_reason}" in inspection.output
+    assert f"Window evaluations:    {evaluated}/5" in inspection.output
+    assert f"Faults injected:       {len(selected)}" in inspection.output

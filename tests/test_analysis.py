@@ -10,6 +10,7 @@ from agentchaos.events.models import (
     EventPayload,
     FaultInjectedPayload,
     OperationFailedPayload,
+    OperationObservedPayload,
     OperationSucceededPayload,
     RetryObservedPayload,
     RunErrorPayload,
@@ -51,6 +52,44 @@ def rate_limit_scenario() -> Scenario:
             },
             "success": {"exit_code": 0},
         }
+    )
+
+
+def probability_scenario(
+    *, start_occurrence: int = 1, end_occurrence: int = 5, seed: int = 10
+) -> Scenario:
+    return Scenario.model_validate(
+        {
+            "schema_version": 1,
+            "name": "probability-analysis",
+            "dependency": {"type": "http", "base_url": "http://localhost:9000"},
+            "workload": {"command": ["python", "agent.py"]},
+            "fault": {
+                "type": "http_error",
+                "target": {"method": "GET", "path": "/customer/*"},
+                "trigger": {
+                    "probability": 0.5,
+                    "seed": seed,
+                    "window": {
+                        "start_occurrence": start_occurrence,
+                        "end_occurrence": end_occurrence,
+                    },
+                },
+                "status_code": 503,
+            },
+            "success": {"exit_code": 0},
+        }
+    )
+
+
+def observed(operation_id: str) -> OperationObservedPayload:
+    return OperationObservedPayload(
+        operation_id=operation_id,
+        method="GET",
+        path="/customer/123",
+        query_hash="query",
+        body_hash="body",
+        fingerprint="fingerprint",
     )
 
 
@@ -856,3 +895,167 @@ def test_duplicate_event_sequence_is_an_internal_error() -> None:
     assert result.result == ExperimentResult.FAILED
     assert result.reason_code == "INTERNAL_ERROR"
     assert result.diagnostics == ("duplicate event sequence numbers were recorded",)
+
+
+def test_complete_probability_window_records_each_selection_and_recovery() -> None:
+    result = analyze(
+        probability_scenario(),
+        events(
+            [
+                observed("one"),
+                OperationSucceededPayload(
+                    operation_id="one",
+                    fingerprint="fingerprint",
+                    status_code=200,
+                    duration_ms=1,
+                ),
+                observed("two"),
+                FaultInjectedPayload(
+                    operation_id="two", fault_type="http_error", parameters={"status_code": 503}
+                ),
+                OperationFailedPayload(
+                    operation_id="two",
+                    fingerprint="fingerprint",
+                    failure_kind="injected_http_error",
+                    status_code=503,
+                    fault_related=True,
+                ),
+                observed("three"),
+                RetryObservedPayload(
+                    operation_id="three",
+                    retry_of_operation_id="two",
+                    fingerprint="fingerprint",
+                    attempt=2,
+                ),
+                OperationSucceededPayload(
+                    operation_id="three",
+                    fingerprint="fingerprint",
+                    status_code=200,
+                    duration_ms=1,
+                    fault_related=True,
+                ),
+                observed("four"),
+                FaultInjectedPayload(
+                    operation_id="four", fault_type="http_error", parameters={"status_code": 503}
+                ),
+                OperationFailedPayload(
+                    operation_id="four",
+                    fingerprint="fingerprint",
+                    failure_kind="injected_http_error",
+                    status_code=503,
+                    fault_related=True,
+                ),
+                observed("five"),
+                RetryObservedPayload(
+                    operation_id="five",
+                    retry_of_operation_id="four",
+                    fingerprint="fingerprint",
+                    attempt=2,
+                ),
+                OperationSucceededPayload(
+                    operation_id="five",
+                    fingerprint="fingerprint",
+                    status_code=200,
+                    duration_ms=1,
+                    fault_related=True,
+                ),
+                WorkloadCompletedPayload(
+                    exit_code=0, timed_out=False, interrupted=False, duration_ms=1
+                ),
+            ]
+        ),
+    )
+
+    assert result.result == ExperimentResult.RECOVERED
+    assert result.reason_code == "RECOVERY_OBSERVED"
+    assert result.trigger is not None
+    assert result.trigger.kind == "seeded_probability"
+    assert result.trigger.evaluated_occurrences == 5
+    assert result.trigger.selected_occurrences == (2, 4)
+    assert result.trigger.completed is True
+    assert result.recoveries_successful == 2
+
+
+def test_recovered_partial_probability_window_still_fails_incomplete() -> None:
+    result = analyze(
+        probability_scenario(),
+        events(
+            [
+                observed("one"),
+                observed("two"),
+                FaultInjectedPayload(
+                    operation_id="two", fault_type="http_error", parameters={"status_code": 503}
+                ),
+                OperationFailedPayload(
+                    operation_id="two",
+                    fingerprint="fingerprint",
+                    failure_kind="injected_http_error",
+                    status_code=503,
+                    fault_related=True,
+                ),
+                observed("three"),
+                RetryObservedPayload(
+                    operation_id="three",
+                    retry_of_operation_id="two",
+                    fingerprint="fingerprint",
+                    attempt=2,
+                ),
+                OperationSucceededPayload(
+                    operation_id="three",
+                    fingerprint="fingerprint",
+                    status_code=200,
+                    duration_ms=1,
+                    fault_related=True,
+                ),
+                WorkloadCompletedPayload(
+                    exit_code=0, timed_out=False, interrupted=False, duration_ms=1
+                ),
+            ]
+        ),
+    )
+
+    assert result.result == ExperimentResult.FAILED
+    assert result.reason_code == "TRIGGER_WINDOW_INCOMPLETE"
+    assert result.diagnostics == (
+        "the probability window required 5 evaluations, but only 3 completed",
+    )
+
+
+def test_completed_probability_window_with_zero_selections_is_not_triggered() -> None:
+    result = analyze(
+        probability_scenario(start_occurrence=5, end_occurrence=6),
+        events(
+            [
+                *(observed(str(index)) for index in range(1, 7)),
+                WorkloadCompletedPayload(
+                    exit_code=0, timed_out=False, interrupted=False, duration_ms=1
+                ),
+            ]
+        ),
+    )
+
+    assert result.result == ExperimentResult.FAILED
+    assert result.reason_code == "FAULT_NOT_TRIGGERED"
+    assert result.trigger is not None
+    assert result.trigger.completed is True
+    assert result.trigger.selected_occurrences == ()
+
+
+def test_probability_injection_that_contradicts_hash_is_internal_error() -> None:
+    result = analyze(
+        probability_scenario(),
+        events(
+            [
+                observed("one"),
+                FaultInjectedPayload(
+                    operation_id="one", fault_type="http_error", parameters={"status_code": 503}
+                ),
+                WorkloadCompletedPayload(
+                    exit_code=0, timed_out=False, interrupted=False, duration_ms=1
+                ),
+            ]
+        ),
+    )
+
+    assert result.result == ExperimentResult.FAILED
+    assert result.reason_code == "INTERNAL_ERROR"

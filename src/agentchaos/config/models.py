@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import re
+from decimal import Decimal
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import (
     AnyHttpUrl,
@@ -12,6 +13,7 @@ from pydantic import (
     ConfigDict,
     Field,
     StrictInt,
+    field_serializer,
     field_validator,
     model_validator,
 )
@@ -116,37 +118,78 @@ class OccurrenceTriggerConfig(StrictModel):
         return (self.occurrence,)
 
 
+class ProbabilityWindowConfig(StrictModel):
+    start_occurrence: StrictInt = Field(gt=0)
+    end_occurrence: StrictInt = Field(gt=0)
+
+    @model_validator(mode="after")
+    def validate_bounds(self) -> ProbabilityWindowConfig:
+        if self.start_occurrence > self.end_occurrence:
+            raise ValueError("window start_occurrence must not exceed end_occurrence")
+        return self
+
+    @property
+    def size(self) -> int:
+        return self.end_occurrence - self.start_occurrence + 1
+
+
+class ProbabilityTriggerConfig(StrictModel):
+    probability: Decimal
+    seed: StrictInt = Field(ge=0, le=(2**64) - 1)
+    window: ProbabilityWindowConfig
+
+    @field_validator("probability", mode="before")
+    @classmethod
+    def validate_probability_input(cls, value: Any) -> Decimal:
+        if isinstance(value, bool) or not isinstance(value, (int, float, Decimal)):
+            raise ValueError("probability must be a numeric value")
+        probability = Decimal(str(value))
+        if not probability.is_finite() or probability <= 0 or probability > 1:
+            raise ValueError("probability must be greater than 0 and at most 1")
+        exponent = probability.as_tuple().exponent
+        if not isinstance(exponent, int) or exponent < -6:
+            raise ValueError("probability supports at most six decimal places")
+        return probability
+
+    @field_serializer("probability")
+    def serialize_probability(self, probability: Decimal) -> float:
+        return float(probability)
+
+
+TriggerConfig = OccurrenceTriggerConfig | ProbabilityTriggerConfig
+
+
 class HttpLatencyFault(StrictModel):
     type: Literal["http_latency"]
     target: FaultTarget
-    trigger: OccurrenceTriggerConfig
+    trigger: TriggerConfig
     latency_ms: int = Field(gt=0)
 
 
 class HttpErrorFault(StrictModel):
     type: Literal["http_error"]
     target: FaultTarget
-    trigger: OccurrenceTriggerConfig
+    trigger: TriggerConfig
     status_code: int = Field(ge=400, le=599)
 
 
 class HttpRateLimitFault(StrictModel):
     type: Literal["http_rate_limit"]
     target: FaultTarget
-    trigger: OccurrenceTriggerConfig
+    trigger: TriggerConfig
     retry_after_seconds: int = Field(ge=0)
 
 
 class HttpMalformedJsonFault(StrictModel):
     type: Literal["http_malformed_json"]
     target: FaultTarget
-    trigger: OccurrenceTriggerConfig
+    trigger: TriggerConfig
 
 
 class HttpDisconnectFault(StrictModel):
     type: Literal["http_disconnect"]
     target: FaultTarget
-    trigger: OccurrenceTriggerConfig
+    trigger: TriggerConfig
 
 
 FaultConfig = Annotated[
