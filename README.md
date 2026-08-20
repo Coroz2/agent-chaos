@@ -228,9 +228,8 @@ report, or modifying the run directory.
   boundaries.
 - [Documentation index](docs/README.md): authority map for specifications, release guidance, and
   archived planning.
-- [v0.4 specification](docs/specs/v0.4.md): approved contract for occurrence schedules and plural
-  recovery evidence.
-- [v0.3 specification](docs/specs/v0.3.md): complete contract for the current released behavior.
+- [v0.4 specification](docs/specs/v0.4.md): complete contract for the current released behavior.
+- [v0.3 specification](docs/specs/v0.3.md): immutable contract for the prior release.
 - [v0.2 specification](docs/specs/v0.2.md): immutable contract for the prior release.
 - [v0.1 specification](docs/specs/v0.1.md): immutable contract for the initial release.
 

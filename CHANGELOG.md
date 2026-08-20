@@ -7,6 +7,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-19
+
 ### Added
 
 - Deterministic occurrence schedules that repeat one configured HTTP fault at strictly increasing
@@ -69,7 +71,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   multiple simultaneous faults, or semantic task grading.
 - Retry classification is a deterministic black-box heuristic rather than proof of workload intent.
 
-[Unreleased]: https://github.com/Coroz2/agent-chaos/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/Coroz2/agent-chaos/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/Coroz2/agent-chaos/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/Coroz2/agent-chaos/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Coroz2/agent-chaos/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Coroz2/agent-chaos/releases/tag/v0.1.0
