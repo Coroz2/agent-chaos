@@ -1,0 +1,35 @@
+schema_version: 1
+name: api-503-probability-incomplete
+
+dependency:
+  type: http
+  base_url: http://127.0.0.1:19112
+  start:
+    command: [python, fake_api.py, --port, "19112"]
+    cwd: ..
+    readiness:
+      path: /health
+
+workload:
+  name: incomplete-probability-window-demo-agent
+  command: [python, demo_agent.py]
+  cwd: ..
+  proxy_url_env: CUSTOMER_API_URL
+
+fault:
+  type: http_error
+  target:
+    method: GET
+    path: /customer/*
+  trigger:
+    probability: 0.5
+    seed: 10
+    window:
+      start_occurrence: 1
+      end_occurrence: 5
+  status_code: 503
+
+success:
+  exit_code: 0
+
+timeout_seconds: 10

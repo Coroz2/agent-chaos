@@ -216,6 +216,37 @@ async def test_adjacent_injections_use_fifo_recovery_links(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
+async def test_probability_selected_retries_create_separate_fifo_failures(tmp_path: Path) -> None:
+    fault = HttpErrorFault.model_validate(
+        {
+            "type": "http_error",
+            "target": {"method": "GET", "path": "/customer/*"},
+            "trigger": {
+                "probability": 0.5,
+                "seed": 42,
+                "window": {"start_occurrence": 1, "end_occurrence": 3},
+            },
+            "status_code": 503,
+        }
+    )
+
+    async with running_proxy(tmp_path, fault) as (proxy, recorder):
+        assert proxy.proxy_url is not None
+        async with httpx.AsyncClient(base_url=proxy.proxy_url, trust_env=False) as client:
+            responses = [await client.get("/customer/123") for _ in range(5)]
+
+    assert [response.status_code for response in responses] == [503, 503, 503, 200, 200]
+    injected = [event for event in recorder.events if event.event_type == EventType.FAULT_INJECTED]
+    retries = [event for event in recorder.events if event.event_type == EventType.RETRY_OBSERVED]
+    assert [event.payload.retry_of_operation_id for event in retries] == [
+        injected[0].payload.operation_id,
+        injected[0].payload.operation_id,
+        injected[0].payload.operation_id,
+        injected[1].payload.operation_id,
+    ]
+
+
+@pytest.mark.asyncio
 async def test_recovery_queues_are_independent_per_fingerprint(tmp_path: Path) -> None:
     fault = HttpErrorFault.model_validate(
         {
@@ -288,6 +319,57 @@ async def test_concurrent_selection_follows_operation_observed_sequence(tmp_path
         if event.event_type == EventType.FAULT_INJECTED
     ]
     assert injected_ids == [observed_ids[2], observed_ids[6], observed_ids[10]]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_probability_selection_follows_operation_observed_sequence(
+    tmp_path: Path,
+) -> None:
+    fault = HttpErrorFault.model_validate(
+        {
+            "type": "http_error",
+            "target": {"method": "GET", "path": "/concurrent"},
+            "trigger": {
+                "probability": 0.5,
+                "seed": 10,
+                "window": {"start_occurrence": 1, "end_occurrence": 5},
+            },
+            "status_code": 503,
+        }
+    )
+    recorder = EventRecorder(tmp_path / "events.jsonl", "run")
+    proxy = ChaosProxy("http://upstream", fault, recorder)
+    fingerprint = proxy._fingerprint("GET", "/concurrent", "query", "body")
+    try:
+        await asyncio.gather(
+            *(
+                proxy._begin_operation(
+                    operation_id=f"operation-{index}",
+                    method="GET",
+                    path="/concurrent",
+                    query_hash="query",
+                    body_hash="body",
+                    fingerprint=fingerprint,
+                    can_inject=True,
+                )
+                for index in range(8)
+            )
+        )
+    finally:
+        await proxy._client.aclose()
+        recorder.close()
+
+    observed_ids = [
+        event.payload.operation_id
+        for event in recorder.events
+        if event.event_type == EventType.OPERATION_OBSERVED
+    ]
+    injected_ids = [
+        event.payload.operation_id
+        for event in recorder.events
+        if event.event_type == EventType.FAULT_INJECTED
+    ]
+    assert injected_ids == [observed_ids[1], observed_ids[3]]
 
 
 @pytest.mark.asyncio

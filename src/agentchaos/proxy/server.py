@@ -34,7 +34,7 @@ from agentchaos.faults.http import (
     HttpTargetMatcher,
     build_http_fault_executor,
 )
-from agentchaos.faults.trigger import OccurrenceTrigger
+from agentchaos.faults.trigger import Trigger, build_trigger
 from agentchaos.proxy.protocol import (
     TRANSPORT_ABORT_STATE_KEY,
     AgentChaosH11Protocol,
@@ -78,7 +78,7 @@ class ChaosProxy:
         self.upstream_url = upstream_url.rstrip("/")
         self.fault = fault
         self.recorder = recorder
-        self.trigger = None if fault is None else OccurrenceTrigger(fault.trigger.schedule)
+        self.trigger: Trigger | None = None if fault is None else build_trigger(fault.trigger)
         self._target_matcher = (
             None if fault is None else HttpTargetMatcher.from_config(fault.target)
         )

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from decimal import Decimal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from agentchaos.analysis.analyzer import ExperimentResult
+from agentchaos.faults.trigger import probability_selects
 
 
 class ReportModel(BaseModel):
@@ -114,10 +116,117 @@ class RecoveryReportV2(ReportModel):
         return self
 
 
+class ProbabilityWindowReport(ReportModel):
+    start_occurrence: int = Field(gt=0)
+    end_occurrence: int = Field(gt=0)
+
+    @model_validator(mode="after")
+    def validate_bounds(self) -> ProbabilityWindowReport:
+        if self.start_occurrence > self.end_occurrence:
+            raise ValueError("probability window bounds are invalid")
+        return self
+
+    @property
+    def size(self) -> int:
+        return self.end_occurrence - self.start_occurrence + 1
+
+
+class OccurrenceScheduleTriggerReport(ReportModel):
+    kind: Literal["occurrence_schedule"] = "occurrence_schedule"
+    scheduled_occurrences: tuple[int, ...]
+    completed_occurrences: tuple[int, ...]
+    completed: bool
+
+    @model_validator(mode="after")
+    def validate_schedule(self) -> OccurrenceScheduleTriggerReport:
+        scheduled = self.scheduled_occurrences
+        completed = self.completed_occurrences
+        if (
+            not scheduled
+            or any(value <= 0 for value in scheduled)
+            or any(
+                current >= following
+                for current, following in zip(scheduled, scheduled[1:], strict=False)
+            )
+        ):
+            raise ValueError("scheduled occurrences must be positive and strictly increasing")
+        if completed != scheduled[: len(completed)]:
+            raise ValueError("completed occurrences must be a prefix of the schedule")
+        if self.completed != (completed == scheduled):
+            raise ValueError("completed must reflect schedule completion")
+        return self
+
+
+class SeededProbabilityTriggerReport(ReportModel):
+    kind: Literal["seeded_probability"] = "seeded_probability"
+    probability: float = Field(gt=0, le=1)
+    seed: int = Field(ge=0, le=(2**64) - 1)
+    window: ProbabilityWindowReport
+    evaluated_occurrences: int = Field(ge=0)
+    selected_occurrences: tuple[int, ...]
+    completed: bool
+
+    @field_validator("probability")
+    @classmethod
+    def validate_probability_precision(cls, probability: float) -> float:
+        exponent = Decimal(str(probability)).as_tuple().exponent
+        if not isinstance(exponent, int) or exponent < -6:
+            raise ValueError("probability supports at most six decimal places")
+        return probability
+
+    @model_validator(mode="after")
+    def validate_evidence(self) -> SeededProbabilityTriggerReport:
+        if self.evaluated_occurrences > self.window.size:
+            raise ValueError("evaluated occurrences cannot exceed the window size")
+        evaluated_end = self.window.start_occurrence + self.evaluated_occurrences - 1
+        selected = self.selected_occurrences
+        if any(
+            value < self.window.start_occurrence or value > evaluated_end for value in selected
+        ) or any(
+            current >= following for current, following in zip(selected, selected[1:], strict=False)
+        ):
+            raise ValueError("selected occurrences must be increasing evaluated window members")
+        if self.completed != (self.evaluated_occurrences == self.window.size):
+            raise ValueError("completed must reflect probability window completion")
+        return self
+
+    @property
+    def expected_selected_occurrences(self) -> tuple[int, ...]:
+        evaluated_end = self.window.start_occurrence + self.evaluated_occurrences
+        probability = Decimal(str(self.probability))
+        return tuple(
+            occurrence
+            for occurrence in range(self.window.start_occurrence, evaluated_end)
+            if probability_selects(probability, self.seed, occurrence)
+        )
+
+
+TriggerReportV3 = Annotated[
+    OccurrenceScheduleTriggerReport | SeededProbabilityTriggerReport,
+    Field(discriminator="kind"),
+]
+
+
+class FaultReportV3(ReportModel):
+    configured: bool
+    type: str | None
+    injected: bool
+    trigger: TriggerReportV3 | None
+
+    @model_validator(mode="after")
+    def validate_fault(self) -> FaultReportV3:
+        if self.configured:
+            if self.type is None or self.trigger is None:
+                raise ValueError("configured faults require a type and trigger")
+        elif self.type is not None or self.injected or self.trigger is not None:
+            raise ValueError("baseline fault reports cannot contain trigger evidence")
+        return self
+
+
 class Report(ReportModel):
     """Strict versioned report with schema-1 construction compatibility."""
 
-    schema_version: Literal[1, 2] = 1
+    schema_version: Literal[1, 2, 3] = 1
     run_id: str
     scenario_name: str
     result: ExperimentResult
@@ -130,7 +239,7 @@ class Report(ReportModel):
     retries_observed: int
     workload_exit_code: int | None
     workload: WorkloadReport
-    fault: FaultReport | FaultReportV2
+    fault: FaultReport | FaultReportV2 | FaultReportV3
     recovery: RecoveryReport | RecoveryReportV2
     timing: TimingReport
     artifacts: ArtifactReport
@@ -143,11 +252,21 @@ class Report(ReportModel):
                 self.recovery, RecoveryReport
             ):
                 raise ValueError("schema-1 reports require schema-1 fault and recovery objects")
-        elif not isinstance(self.fault, FaultReportV2) or not isinstance(
-            self.recovery, RecoveryReportV2
+        elif self.schema_version == 2 and (
+            not isinstance(self.fault, FaultReportV2)
+            or not isinstance(self.recovery, RecoveryReportV2)
         ):
             raise ValueError("schema-2 reports require schema-2 fault and recovery objects")
-        elif self.faults_injected != len(self.fault.completed_occurrences):
+        elif self.schema_version == 3 and (
+            not isinstance(self.fault, FaultReportV3)
+            or not isinstance(self.recovery, RecoveryReportV2)
+        ):
+            raise ValueError("schema-3 reports require schema-3 fault and plural recovery objects")
+        if (
+            self.schema_version == 2
+            and isinstance(self.fault, FaultReportV2)
+            and (self.faults_injected != len(self.fault.completed_occurrences))
+        ):
             over_injection = (
                 self.fault.configured
                 and self.result == ExperimentResult.FAILED
@@ -157,15 +276,17 @@ class Report(ReportModel):
             )
             if not over_injection:
                 raise ValueError("faults_injected must equal completed scheduled occurrences")
+        if self.schema_version == 3 and isinstance(self.fault, FaultReportV3):
+            self._validate_schema_three_fault_evidence()
         if (
-            self.schema_version == 2
-            and isinstance(self.fault, FaultReportV2)
+            self.schema_version in {2, 3}
+            and isinstance(self.fault, (FaultReportV2, FaultReportV3))
             and isinstance(self.recovery, RecoveryReportV2)
             and not self.fault.configured
             and self.recovery.required != 0
         ):
             raise ValueError("baseline reports cannot contain recovery evidence")
-        if self.schema_version == 2 and isinstance(self.recovery, RecoveryReportV2):
+        if self.schema_version in {2, 3} and isinstance(self.recovery, RecoveryReportV2):
             counts = (
                 self.duration_ms,
                 self.faults_injected,
@@ -190,8 +311,44 @@ class Report(ReportModel):
                 raise ValueError("successful recoveries cannot exceed observed retries")
             if self.recovery.successful > self.successful_operations:
                 raise ValueError("successful recoveries cannot exceed successful operations")
-            self._validate_schema_two_outcome()
+            if self.schema_version == 2:
+                self._validate_schema_two_outcome()
+            else:
+                self._validate_schema_three_outcome()
         return self
+
+    def _validate_schema_three_fault_evidence(self) -> None:
+        assert isinstance(self.fault, FaultReportV3)
+        trigger = self.fault.trigger
+        selected_count = 0
+        trigger_consistent = True
+        if isinstance(trigger, OccurrenceScheduleTriggerReport):
+            selected_count = len(trigger.completed_occurrences)
+        elif isinstance(trigger, SeededProbabilityTriggerReport):
+            selected_count = len(trigger.selected_occurrences)
+            trigger_consistent = (
+                trigger.selected_occurrences == trigger.expected_selected_occurrences
+            )
+        count_consistent = self.faults_injected == selected_count and self.fault.injected == bool(
+            self.faults_injected
+        )
+        if not count_consistent or not trigger_consistent:
+            evidence_may_be_incomplete = (
+                self.result == ExperimentResult.FAILED
+                and self.reason_code
+                in {
+                    "DEPENDENCY_START_FAILED",
+                    "PROXY_START_FAILED",
+                    "WORKLOAD_SPAWN_FAILED",
+                    "WORKLOAD_NOT_COMPLETED",
+                    "INTERRUPTED",
+                    "WORKLOAD_TIMED_OUT",
+                    "WORKLOAD_EXIT_CODE_MISMATCH",
+                    "INTERNAL_ERROR",
+                }
+            )
+            if not evidence_may_be_incomplete:
+                raise ValueError("fault counts and trigger selections must agree")
 
     def _validate_schema_two_outcome(self) -> None:
         assert isinstance(self.fault, FaultReportV2)
@@ -236,6 +393,57 @@ class Report(ReportModel):
 
         if (self.result, self.reason_code) != expected:
             raise ValueError("result and reason code contradict schema-2 evidence")
+
+    def _validate_schema_three_outcome(self) -> None:
+        assert isinstance(self.fault, FaultReportV3)
+        assert isinstance(self.recovery, RecoveryReportV2)
+        if self.workload_exit_code != self.workload.exit_code:
+            raise ValueError("top-level and workload exit codes must agree")
+        if self.workload.interrupted and self.workload.timed_out:
+            raise ValueError("workload cannot be both interrupted and timed out")
+
+        run_error_reasons = {
+            "DEPENDENCY_START_FAILED",
+            "PROXY_START_FAILED",
+            "WORKLOAD_SPAWN_FAILED",
+            "INTERNAL_ERROR",
+        }
+        if self.reason_code in run_error_reasons:
+            if self.result != ExperimentResult.FAILED:
+                raise ValueError("failure reason codes require a FAILED result")
+            return
+
+        expected: tuple[ExperimentResult, str]
+        if self.workload.interrupted:
+            expected = (ExperimentResult.FAILED, "INTERRUPTED")
+        elif self.workload.timed_out:
+            expected = (ExperimentResult.FAILED, "WORKLOAD_TIMED_OUT")
+        elif self.workload.exit_code is None:
+            expected = (ExperimentResult.FAILED, "WORKLOAD_NOT_COMPLETED")
+        elif self.workload.exit_code != self.workload.expected_exit_code:
+            expected = (ExperimentResult.FAILED, "WORKLOAD_EXIT_CODE_MISMATCH")
+        elif not self.fault.configured:
+            expected = (ExperimentResult.PASSED, "BASELINE_SUCCEEDED")
+        elif self.faults_injected == 0:
+            expected = (ExperimentResult.FAILED, "FAULT_NOT_TRIGGERED")
+        else:
+            assert self.fault.trigger is not None
+            if not self.fault.trigger.completed:
+                reason = (
+                    "FAULT_SCHEDULE_INCOMPLETE"
+                    if isinstance(self.fault.trigger, OccurrenceScheduleTriggerReport)
+                    else "TRIGGER_WINDOW_INCOMPLETE"
+                )
+                expected = (ExperimentResult.FAILED, reason)
+            elif self.recovery.required == 0:
+                expected = (ExperimentResult.PASSED, "FAULT_TOLERATED")
+            elif self.recovery.successful == self.recovery.required:
+                expected = (ExperimentResult.RECOVERED, "RECOVERY_OBSERVED")
+            else:
+                expected = (ExperimentResult.FAILED, "RECOVERY_NOT_OBSERVED")
+
+        if (self.result, self.reason_code) != expected:
+            raise ValueError("result and reason code contradict schema-3 evidence")
 
 
 type ReportDocument = Report

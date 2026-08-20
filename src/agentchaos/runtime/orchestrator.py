@@ -10,7 +10,13 @@ from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
-from agentchaos.analysis.analyzer import AnalysisResult, ExperimentResult, analyze
+from agentchaos.analysis.analyzer import (
+    AnalysisResult,
+    ExperimentResult,
+    OccurrenceScheduleEvidence,
+    ProbabilityWindowEvidence,
+    analyze,
+)
 from agentchaos.config.models import Scenario
 from agentchaos.events.models import (
     DependencyReadyPayload,
@@ -28,10 +34,13 @@ from agentchaos.events.recorder import EventRecorder
 from agentchaos.proxy.server import ChaosProxy
 from agentchaos.reporting.models import (
     ArtifactReport,
-    FaultReportV2,
+    FaultReportV3,
+    OccurrenceScheduleTriggerReport,
+    ProbabilityWindowReport,
     RecoveryEvidenceReport,
     RecoveryReportV2,
     Report,
+    SeededProbabilityTriggerReport,
     TimingReport,
     WorkloadReport,
 )
@@ -257,7 +266,7 @@ def _build_report(
     started_at = events[0].timestamp
     completed_at = events[-1].timestamp
     return Report(
-        schema_version=2,
+        schema_version=3,
         run_id=run_id,
         scenario_name=scenario.name,
         result=analysis.result,
@@ -276,13 +285,11 @@ def _build_report(
             timed_out=analysis.workload_timed_out,
             interrupted=analysis.workload_interrupted,
         ),
-        fault=FaultReportV2(
+        fault=FaultReportV3(
             configured=scenario.fault is not None,
             type=None if scenario.fault is None else scenario.fault.type,
             injected=analysis.faults_injected > 0,
-            scheduled_occurrences=analysis.scheduled_occurrences,
-            completed_occurrences=analysis.completed_occurrences,
-            schedule_completed=(analysis.completed_occurrences == analysis.scheduled_occurrences),
+            trigger=_build_trigger_report(analysis),
         ),
         recovery=RecoveryReportV2(
             required=analysis.recoveries_required,
@@ -307,6 +314,32 @@ def _build_report(
             report="report.json",
         ),
         diagnostics=list(analysis.diagnostics),
+    )
+
+
+def _build_trigger_report(
+    analysis: AnalysisResult,
+) -> OccurrenceScheduleTriggerReport | SeededProbabilityTriggerReport | None:
+    trigger = analysis.trigger
+    if trigger is None:
+        return None
+    if isinstance(trigger, OccurrenceScheduleEvidence):
+        return OccurrenceScheduleTriggerReport(
+            scheduled_occurrences=trigger.scheduled_occurrences,
+            completed_occurrences=trigger.completed_occurrences,
+            completed=trigger.completed,
+        )
+    assert isinstance(trigger, ProbabilityWindowEvidence)
+    return SeededProbabilityTriggerReport(
+        probability=float(trigger.probability),
+        seed=trigger.seed,
+        window=ProbabilityWindowReport(
+            start_occurrence=trigger.start_occurrence,
+            end_occurrence=trigger.end_occurrence,
+        ),
+        evaluated_occurrences=trigger.evaluated_occurrences,
+        selected_occurrences=trigger.selected_occurrences,
+        completed=trigger.completed,
     )
 
 

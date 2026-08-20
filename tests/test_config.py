@@ -93,6 +93,61 @@ def test_all_faults_accept_occurrence_schedules(
 
 
 @pytest.mark.parametrize(
+    "fault_type",
+    [
+        "http_latency",
+        "http_error",
+        "http_rate_limit",
+        "http_malformed_json",
+        "http_disconnect",
+    ],
+)
+def test_all_faults_accept_seeded_probability_windows(tmp_path: Path, fault_type: str) -> None:
+    content = scenario_for_fault_type(fault_type).replace(
+        "occurrence: 2",
+        "probability: 0.123456\n"
+        "    seed: 18446744073709551615\n"
+        "    window:\n"
+        "      start_occurrence: 2\n"
+        "      end_occurrence: 8",
+    )
+
+    scenario = load_scenario(write_scenario(tmp_path, content))
+
+    assert scenario.fault is not None
+    assert str(scenario.fault.trigger.probability) == "0.123456"
+    assert scenario.fault.trigger.seed == (2**64) - 1
+    assert scenario.fault.trigger.window.size == 7
+
+
+@pytest.mark.parametrize(
+    "trigger",
+    [
+        "{probability: 0, seed: 1, window: {start_occurrence: 1, end_occurrence: 2}}",
+        "{probability: 1.1, seed: 1, window: {start_occurrence: 1, end_occurrence: 2}}",
+        "{probability: 0.1234567, seed: 1, window: {start_occurrence: 1, end_occurrence: 2}}",
+        "{probability: '0.5', seed: 1, window: {start_occurrence: 1, end_occurrence: 2}}",
+        "{probability: true, seed: 1, window: {start_occurrence: 1, end_occurrence: 2}}",
+        "{probability: 0.5, seed: -1, window: {start_occurrence: 1, end_occurrence: 2}}",
+        "{probability: 0.5, seed: 18446744073709551616, "
+        "window: {start_occurrence: 1, end_occurrence: 2}}",
+        "{probability: 0.5, seed: true, window: {start_occurrence: 1, end_occurrence: 2}}",
+        "{probability: 0.5, seed: 1, window: {start_occurrence: 0, end_occurrence: 2}}",
+        "{probability: 0.5, seed: 1, window: {start_occurrence: 3, end_occurrence: 2}}",
+        "{probability: 0.5, seed: 1, window: {start_occurrence: 1, end_occurrence: 2, unknown: 3}}",
+        "{occurrence: 2, probability: 0.5, seed: 1, "
+        "window: {start_occurrence: 1, end_occurrence: 2}}",
+        "{probability: 0.5, seed: 1}",
+    ],
+)
+def test_probability_trigger_rejects_invalid_forms(tmp_path: Path, trigger: str) -> None:
+    invalid = VALID_SCENARIO.replace("trigger:\n    occurrence: 2", f"trigger: {trigger}")
+
+    with pytest.raises(ScenarioLoadError):
+        load_scenario(write_scenario(tmp_path, invalid))
+
+
+@pytest.mark.parametrize(
     "trigger",
     [
         "{}",
