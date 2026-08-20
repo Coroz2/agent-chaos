@@ -256,8 +256,8 @@ report, or modifying the run directory.
   boundaries.
 - [Documentation index](docs/README.md): authority map for specifications, release guidance, and
   archived planning.
-- [v0.5 specification](docs/specs/v0.5.md): approved contract for the next release.
-- [v0.4 specification](docs/specs/v0.4.md): complete contract for the current released behavior.
+- [v0.5 specification](docs/specs/v0.5.md): complete contract for the current released behavior.
+- [v0.4 specification](docs/specs/v0.4.md): immutable contract for the prior release.
 - [v0.3 specification](docs/specs/v0.3.md): immutable contract for the prior release.
 - [v0.2 specification](docs/specs/v0.2.md): immutable contract for the prior release.
 - [v0.1 specification](docs/specs/v0.1.md): immutable contract for the initial release.
@@ -289,7 +289,7 @@ It is useful black-box evidence, not proof of the workload's internal intent.
 
 ## Roadmap
 
-After the approved v0.5 probability-window work, the next logical steps are multi-fault campaigns,
+After v0.5's probability-window work, the next logical steps are multi-fault campaigns,
 then another dependency adapter such as MCP. These are broad, nonbinding directions; detailed
 release scope begins only in an approved version specification.
 
